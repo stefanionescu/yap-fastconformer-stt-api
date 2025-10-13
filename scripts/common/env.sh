@@ -3,7 +3,7 @@
 
 # Server bind
 export ASR_HOST="0.0.0.0"
-export ASR_PORT="8080"
+export ASR_PORT="8000"
 
 # Model + runtime
 export ASR_MODEL="nvidia/stt_en_fastconformer_hybrid_large_streaming_multi"

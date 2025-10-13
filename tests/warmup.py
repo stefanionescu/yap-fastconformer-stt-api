@@ -21,7 +21,7 @@ from common import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Warmup via WebSocket streaming")
     default_host = os.getenv("ASR_HOST", "127.0.0.1")
-    default_port = os.getenv("ASR_PORT", "8080")
+    default_port = os.getenv("ASR_PORT", "8000")
     default_server = f"{default_host}:{default_port}"
     parser.add_argument("--server", type=str, default=default_server, help="host:port or ws://host:port")
     parser.add_argument("--secure", action="store_true")

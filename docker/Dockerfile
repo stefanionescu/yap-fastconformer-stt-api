@@ -41,7 +41,7 @@ RUN chmod +x /entrypoint.sh
 COPY tests /app/tests
 COPY samples /app/samples
 
-EXPOSE 8080
+EXPOSE 8000
 ENTRYPOINT ["/entrypoint.sh"]
 
 

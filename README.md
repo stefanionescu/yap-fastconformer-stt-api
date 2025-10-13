@@ -33,14 +33,14 @@ bash docker/build.sh
 bash docker/run.sh
 ```
 
-The server listens on `ws://localhost:8080`.
+The server listens on `ws://localhost:8000`.
 
 3) Try client/warmup/bench (from host)
 
 ```bash
-python tests/warmup.py --server 127.0.0.1:8080 --file samples/mid.wav --rtf 1000 --full-text
-python tests/client.py  --server 127.0.0.1:8080 --file samples/mid.wav --rtf 1.0 --print-partials
-python tests/bench.py   --server 127.0.0.1:8080 --file samples/mid.wav --rtf 1.0 --n 20 --concurrency 5
+python tests/warmup.py --server 127.0.0.1:8000 --file samples/mid.wav --rtf 10 --full-text
+python tests/client.py  --server 127.0.0.1:8000 --file samples/mid.wav --rtf 1.0 --print-partials
+python tests/bench.py   --server 127.0.0.1:8000 --file samples/mid.wav --rtf 1.0 --n 20 --concurrency 5
 ```
 
 ### WebSocket Protocol
@@ -97,7 +97,7 @@ $EDITOR scripts/env.sh
 
 ```bash
 bash scripts/run_server.sh
-# listens on ws://${ASR_HOST}:${ASR_PORT} (defaults 0.0.0.0:8080)
+# listens on ws://${ASR_HOST}:${ASR_PORT} (defaults 0.0.0.0:8000)
 ```
 
 4) Warmup / test from the same machine:
