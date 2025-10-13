@@ -10,6 +10,6 @@ DEFAULT_ATT_CONTEXT = (70, 1)  # (lookahead, heads)
 DEFAULT_DECODER: str = "rnnt"
 DEFAULT_DEVICE: str = "cuda:0"
 DEFAULT_STEP_MS: int = 80
-DEFAULT_MAX_BATCH: int = 128
+DEFAULT_MAX_BATCH: int = 64
 
 

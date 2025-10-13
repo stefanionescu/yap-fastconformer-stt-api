@@ -80,6 +80,28 @@ class GlobalBatcher:
         self._tick_task: Optional[asyncio.Task] = None
         self._ema_step_ms = None
 
+        # --- Pre-encode feature cache (features) per slot ---
+        try:
+            scfg = self.model.encoder.streaming_cfg
+            pre_cache_pair = getattr(scfg, "pre_encode_cache", None)
+            if pre_cache_pair is None:
+                pre_cache_pair = getattr(scfg, "pre_encode_cache_size", [0, 0])
+            if isinstance(pre_cache_pair, (list, tuple)):
+                pre_cache_frames = int(pre_cache_pair[1]) if len(pre_cache_pair) > 1 else int(pre_cache_pair[0])
+            else:
+                pre_cache_frames = int(pre_cache_pair)
+        except Exception:
+            pre_cache_frames = 0
+        try:
+            n_mels = int(getattr(self.model.cfg.preprocessor, "features", 80))
+        except Exception:
+            n_mels = 80
+        self._pre_cache_frames = pre_cache_frames
+        self._n_mels = n_mels
+        self._pre_cache = torch.zeros(
+            (self.max_slots, n_mels, pre_cache_frames), dtype=torch.float32, device=self.device
+        )
+
     async def add_stream(self, sid: str, sr: int = 16000):
         async with self._lock:
             if sid in self._sid2slot:
@@ -164,23 +186,42 @@ class GlobalBatcher:
                     chunks.append(chunk)
                     lens.append(self.samples_per_step)
 
-            B = len(sids)
             audio = torch.from_numpy(np.stack(chunks, axis=0)).to(self.device, dtype=torch.float32)
-            lengths = torch.tensor(lens, dtype=torch.int64, device=self.device)
+            lengths_samples = torch.tensor(lens, dtype=torch.int64, device=self.device)
+
+            # Select active subset (those that delivered nonzero audio this tick)
+            active = [i for i, L in enumerate(lens) if L > 0]
+            if not active:
+                return
+
+            act_slots = [slots[i] for i in active]
+            active_idx = torch.tensor(active, dtype=torch.long, device=self.device)
+            audio_act = audio.index_select(0, active_idx)
+            len_act_samples = lengths_samples.index_select(0, active_idx)
+
+            # 1) Waveform -> features (B_act, n_mels, T_frames)
+            with torch.no_grad():
+                feats_act, feat_len_act = self.model.preprocessor(
+                    input_signal=audio_act, length=len_act_samples
+                )
+
+            # 2) Concat pre-encode cache on time dim
+            act_slots_idx = torch.tensor(act_slots, dtype=torch.long, device=self.device)
+            pre_cache_sel = self._pre_cache.index_select(0, act_slots_idx)
+            feats_cat = torch.cat([pre_cache_sel, feats_act], dim=-1)
+            proc_len_frames = feat_len_act + pre_cache_sel.size(-1)
 
             def _gather_rows(t: Optional[torch.Tensor], idx: List[int]) -> Optional[torch.Tensor]:
                 if t is None:
                     return None
                 return t.index_select(0, torch.tensor(idx, dtype=torch.long, device=t.device))
 
-            cache_ch = _gather_rows(self._cache_ch, slots)
-            cache_t = _gather_rows(self._cache_t, slots)
-            cache_ch_len = _gather_rows(self._cache_ch_len, slots)
+            cache_ch = _gather_rows(self._cache_ch, act_slots)
+            cache_t = _gather_rows(self._cache_t, act_slots)
+            cache_ch_len = _gather_rows(self._cache_ch_len, act_slots)
 
-            # Gather per-stream RNNT hypotheses state for active slots
-            prev_hyp_batch: List[Optional[object]] = [self._prev_hypotheses[s] for s in slots]
-            # Gather per-stream RNNT predictor state for active slots
-            prev_pred_out_batch: List[Optional[object]] = [self._prev_pred_out[s] for s in slots]
+            prev_hyp_batch: List[Optional[object]] = [self._prev_hypotheses[s] for s in act_slots]
+            prev_pred_out_batch: List[Optional[object]] = [self._prev_pred_out[s] for s in act_slots]
 
             with torch.inference_mode():
                 (
@@ -191,16 +232,14 @@ class GlobalBatcher:
                     cache_ch_len_new,
                     new_prev_hypotheses,
                 ) = self.model.conformer_stream_step(
-                    processed_signal=audio,
-                    processed_signal_length=lengths,
+                    processed_signal=feats_cat,
+                    processed_signal_length=proc_len_frames,
                     cache_last_channel=cache_ch,
                     cache_last_time=cache_t,
                     cache_last_channel_len=cache_ch_len,
-                    # Continuous stream: don't keep invalid tail outputs (only True on known final step)
                     keep_all_outputs=False,
                     previous_hypotheses=prev_hyp_batch,
                     previous_pred_out=prev_pred_out_batch,
-                    # After the first tick, drop the extra pre-encoded frames per streaming_cfg
                     drop_extra_pre_encoded=(
                         0 if self._global_step == 0
                         else int(self.model.encoder.streaming_cfg.drop_extra_pre_encoded)
@@ -214,40 +253,52 @@ class GlobalBatcher:
                     return
                 dst.index_copy_(0, torch.tensor(idx, dtype=torch.long, device=dst.device), src)
 
-            _scatter_rows(self._cache_ch, cache_ch_new, slots)
-            _scatter_rows(self._cache_t, cache_t_new, slots)
-            _scatter_rows(self._cache_ch_len, cache_ch_len_new, slots)
+            _scatter_rows(self._cache_ch, cache_ch_new, act_slots)
+            _scatter_rows(self._cache_t, cache_t_new, act_slots)
+            _scatter_rows(self._cache_ch_len, cache_ch_len_new, act_slots)
 
-            # Persist updated RNNT hypotheses back to their slots
+            # 4) Update per-slot pre-encode cache: keep last K feature frames
+            K = int(self._pre_cache_frames)
+            if K > 0:
+                total_frames = feats_cat.size(-1)
+                if total_frames >= K:
+                    tail = feats_cat[:, :, -K:]
+                else:
+                    pad = torch.zeros(
+                        (feats_cat.size(0), feats_cat.size(1), K - total_frames),
+                        dtype=feats_cat.dtype,
+                        device=feats_cat.device,
+                    )
+                    tail = torch.cat([pad, feats_cat], dim=-1)
+                self._pre_cache.index_copy_(0, act_slots_idx, tail)
+
+            # Persist updated RNNT hypotheses back to their slots (only active)
             try:
                 if isinstance(new_prev_hypotheses, (list, tuple)):
-                    for i, slot in enumerate(slots):
-                        # Guard against length mismatches
+                    for i, slot in enumerate(act_slots):
                         if i < len(new_prev_hypotheses):
                             self._prev_hypotheses[slot] = new_prev_hypotheses[i]
                 else:
-                    # Fallback: if model returns a single object per batch, clear to avoid stale state
-                    for slot in slots:
+                    for slot in act_slots:
                         self._prev_hypotheses[slot] = None
             except Exception:
-                for slot in slots:
+                for slot in act_slots:
                     self._prev_hypotheses[slot] = None
 
-            # Persist updated RNNT predictor state back to their slots
+            # Persist updated RNNT predictor state back to their slots (only active)
             try:
                 if isinstance(pred_out_stream, (list, tuple)):
-                    for i, slot in enumerate(slots):
+                    for i, slot in enumerate(act_slots):
                         if i < len(pred_out_stream):
                             self._prev_pred_out[slot] = pred_out_stream[i]
                 else:
-                    for slot in slots:
+                    for slot in act_slots:
                         self._prev_pred_out[slot] = pred_out_stream
             except Exception:
-                for slot in slots:
+                for slot in act_slots:
                     self._prev_pred_out[slot] = None
 
             now_ms = int(time.time() * 1000)
-            # Robust extraction like NVIDIA example: hypotheses may be Hypothesis objects or plain strings
             texts: List[str] = []
             try:
                 for h in transcribed_texts:
@@ -256,15 +307,16 @@ class GlobalBatcher:
                     else:
                         texts.append(str(h or ""))
             except Exception:
-                texts = [""] * len(sids)
-            for sid, txt in zip(sids, texts):
+                texts = [""] * len(active)
+
+            for sid, txt in zip([sids[i] for i in active], texts):
                 try:
                     self.results.put_nowait((sid, txt, now_ms))
                 except asyncio.QueueFull:
                     pass
 
             if self.verbose and self._ema_step_ms is not None and (int(time.time() * 10) % 10 == 0):
-                print(f"[batcher] active={B}/{self.max_slots} tick≈{self._ema_step_ms:.2f} ms")
+                print(f"[batcher] active={len(active)}/{self.max_slots} tick≈{self._ema_step_ms:.2f} ms")
 
 
 
@@ -275,9 +327,9 @@ class GlobalBatcher:
                 return ""
             slot = self._sid2slot[sid]
 
-            # Build a zero-length tick for this slot; we just want the model to flush.
-            audio = torch.zeros((1, self.samples_per_step), dtype=torch.float32, device=self.device)
-            lengths = torch.tensor([0], dtype=torch.int64, device=self.device)
+            # Use just the pre-encode cache to flush tail
+            pre_cache = self._pre_cache[slot:slot+1]
+            proc_len = torch.tensor([pre_cache.shape[-1]], dtype=torch.int64, device=self.device)
 
             def _slice_row(t: Optional[torch.Tensor], i: int) -> Optional[torch.Tensor]:
                 if t is None:
@@ -300,12 +352,12 @@ class GlobalBatcher:
                     cache_ch_len_new,
                     new_prev_hypotheses,
                 ) = self.model.conformer_stream_step(
-                    processed_signal=audio,
-                    processed_signal_length=lengths,
+                    processed_signal=pre_cache,
+                    processed_signal_length=proc_len,
                     cache_last_channel=cache_ch,
                     cache_last_time=cache_t,
                     cache_last_channel_len=cache_ch_len,
-                    keep_all_outputs=True,  # release tail outputs on final step
+                    keep_all_outputs=True,
                     previous_hypotheses=prev_h,
                     previous_pred_out=prev_p,
                     drop_extra_pre_encoded=int(self.model.encoder.streaming_cfg.drop_extra_pre_encoded),
