@@ -11,7 +11,7 @@ fi
 # shellcheck disable=SC1090
 source "${REPO_ROOT}/.venv/bin/activate"
 
-pip install --upgrade pip setuptools wheel build
+pip install --upgrade pip wheel build "setuptools<81"
 
 # Ensure build tooling is present for native deps built from sdist
 pip install "Cython>=0.29.0" "numpy==1.26.4"

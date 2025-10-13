@@ -24,12 +24,19 @@ bash docker/run.sh
 
 The server listens on `ws://localhost:8000`.
 
-3) Try client/warmup/bench (from host)
+3) Run Tests
 
 ```bash
-python tests/warmup.py --server 127.0.0.1:8000 --file samples/mid.wav --rtf 10 --full-text
-python tests/client.py  --server 127.0.0.1:8000 --file samples/mid.wav --rtf 1.0 --print-partials
-python tests/bench.py   --server 127.0.0.1:8000 --file samples/mid.wav --rtf 1.0 --n 20 --concurrency 5
+python tests/warmup.py --server 127.0.0.1:8000 --file mid.wav --rtf 10 --full-text
+python tests/bench.py   --server 127.0.0.1:8000 --file mid.wav --rtf 1.0 --n 20 --concurrency 5
+```
+
+Note: When running these inside the container, first activate the virtualenv or use the wrapper:
+
+```bash
+source .venv/bin/activate
+# or
+bash scripts/run/warmup.sh mid.wav 10
 ```
 
 ### WebSocket Protocol
@@ -90,6 +97,12 @@ python tests/bench.py --server 127.0.0.1:8000 --file samples/mid.wav --rtf 1.0 -
 
 # Stop server + cleanup:
 bash scripts/stop.sh
+```
+
+If you run Python directly inside the repo, activate the venv first:
+
+```bash
+source .venv/bin/activate
 ```
 
 ## Configuration

@@ -69,9 +69,17 @@ def file_duration_seconds(path: str) -> float:
 
 def resolve_sample_path(filename: str) -> Path:
     p = Path(filename)
+    # Absolute path: use as-is
     if p.is_absolute():
         return p
-    return SAMPLES_DIR / filename
+    # If the relative path exists as given, respect it
+    if p.exists():
+        return p
+    # If the user passed a path starting with "samples/", avoid double-prefixing
+    parts = p.parts
+    if parts and parts[0] == "samples":
+        p = Path(*parts[1:]) if len(parts) > 1 else Path("")
+    return SAMPLES_DIR / p
 
 
 # ---------- Streaming helpers ----------
