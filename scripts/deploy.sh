@@ -13,6 +13,14 @@ fi
 # shellcheck source=deps/common.sh
 source "$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )/deps/common.sh"
 
+# Check HF_TOKEN is set
+if [[ -z "${HF_TOKEN:-}" ]]; then
+  echo "[deploy] ERROR: HF_TOKEN environment variable is required for model download" >&2
+  echo "[deploy] Set it with: export HF_TOKEN=your_token_here" >&2
+  echo "[deploy] Get token from: https://huggingface.co/settings/tokens" >&2
+  exit 1
+fi
+
 REPO_ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )"
 LOG_DIR="${REPO_ROOT}/logs"
 RUN_DIR="${REPO_ROOT}/.run"

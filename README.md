@@ -66,6 +66,13 @@ docker run --rm -it --gpus all -p 8080:8080 \
 
 ## Script Deployment
 
+1) Set up Hugging Face token:
+```bash
+export HF_TOKEN=your_token_here
+# Get token from: https://huggingface.co/settings/tokens
+```
+
+2) Deploy server:
 ```bash
 # Deploy server (creates venv, installs deps, starts in background):
 bash scripts/deploy.sh
