@@ -215,10 +215,22 @@ class GlobalBatcher:
                 feats_act, feat_len_act = self.model.preprocessor(
                     input_signal=audio_act, length=len_act_samples
                 )
+            try:
+                feat_len_list = feat_len_act.detach().cpu().tolist()
+            except Exception:
+                feat_len_list = []
 
             # 2) Concat pre-encode cache on time dim
             act_slots_idx = torch.tensor(act_slots, dtype=torch.long, device=self.device)
             pre_cache_sel = self._pre_cache.index_select(0, act_slots_idx)
+            self._log_debug(
+                "stream step shapes audio=%s feats=%s pre_cache=%s feat_len=%s" % (
+                    tuple(audio_act.shape),
+                    tuple(feats_act.shape),
+                    tuple(pre_cache_sel.shape),
+                    feat_len_list,
+                )
+            )
             feats_cat = torch.cat([pre_cache_sel, feats_act], dim=-1)
             proc_len_frames = feat_len_act + pre_cache_sel.size(-1)
 
@@ -334,7 +346,6 @@ class GlobalBatcher:
                 print(f"[batcher] active={len(active)}/{self.max_slots} tick≈{self._ema_step_ms:.2f} ms")
 
 
-
     async def flush_stream(self, sid: str) -> str:
         """Run a final step for SID with keep_all_outputs=True to release tail frames."""
         async with self._lock:
@@ -345,6 +356,14 @@ class GlobalBatcher:
             # Use just the pre-encode cache to flush tail
             pre_cache = self._pre_cache[slot:slot+1]
             proc_len = torch.tensor([pre_cache.shape[-1]], dtype=torch.int64, device=self.device)
+            self._log_debug(
+                "flush shapes pre_cache=%s cache_ch=%s cache_t=%s cache_len=%s" % (
+                    tuple(pre_cache.shape),
+                    None if self._cache_ch is None else tuple(self._cache_ch[slot:slot+1].shape),
+                    None if self._cache_t is None else tuple(self._cache_t[slot:slot+1].shape),
+                    None if self._cache_ch_len is None else tuple(self._cache_ch_len[slot:slot+1].shape),
+                )
+            )
 
             def _slice_row(t: Optional[torch.Tensor], i: int) -> Optional[torch.Tensor]:
                 if t is None:
