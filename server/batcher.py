@@ -267,3 +267,87 @@ class GlobalBatcher:
                 print(f"[batcher] active={B}/{self.max_slots} tick≈{self._ema_step_ms:.2f} ms")
 
 
+
+    async def flush_stream(self, sid: str) -> str:
+        """Run a final step for SID with keep_all_outputs=True to release tail frames."""
+        async with self._lock:
+            if sid not in self._sid2slot:
+                return ""
+            slot = self._sid2slot[sid]
+
+            # Build a zero-length tick for this slot; we just want the model to flush.
+            audio = torch.zeros((1, self.samples_per_step), dtype=torch.float32, device=self.device)
+            lengths = torch.tensor([0], dtype=torch.int64, device=self.device)
+
+            def _slice_row(t: Optional[torch.Tensor], i: int) -> Optional[torch.Tensor]:
+                if t is None:
+                    return None
+                return t[i:i+1]
+
+            cache_ch = _slice_row(self._cache_ch, slot)
+            cache_t = _slice_row(self._cache_t, slot)
+            cache_ch_len = _slice_row(self._cache_ch_len, slot)
+
+            prev_h = [self._prev_hypotheses[slot]]
+            prev_p = [self._prev_pred_out[slot]]
+
+            with torch.inference_mode():
+                (
+                    pred_out_stream,
+                    transcribed_texts,
+                    cache_ch_new,
+                    cache_t_new,
+                    cache_ch_len_new,
+                    new_prev_hypotheses,
+                ) = self.model.conformer_stream_step(
+                    processed_signal=audio,
+                    processed_signal_length=lengths,
+                    cache_last_channel=cache_ch,
+                    cache_last_time=cache_t,
+                    cache_last_channel_len=cache_ch_len,
+                    keep_all_outputs=True,  # release tail outputs on final step
+                    previous_hypotheses=prev_h,
+                    previous_pred_out=prev_p,
+                    drop_extra_pre_encoded=int(self.model.encoder.streaming_cfg.drop_extra_pre_encoded),
+                    return_transcription=True,
+                )
+
+            # Write back updated caches (harmless on final)
+            if cache_ch_new is not None and self._cache_ch is not None:
+                self._cache_ch[slot:slot+1].copy_(cache_ch_new)
+            if cache_t_new is not None and self._cache_t is not None:
+                self._cache_t[slot:slot+1].copy_(cache_t_new)
+            if cache_ch_len_new is not None and self._cache_ch_len is not None:
+                self._cache_ch_len[slot:slot+1].copy_(cache_ch_len_new)
+
+            # Persist RNNT predictor + hypotheses for completeness
+            try:
+                if isinstance(pred_out_stream, (list, tuple)):
+                    self._prev_pred_out[slot] = pred_out_stream[0] if pred_out_stream else None
+                else:
+                    self._prev_pred_out[slot] = pred_out_stream
+            except Exception:
+                self._prev_pred_out[slot] = None
+
+            try:
+                if isinstance(new_prev_hypotheses, (list, tuple)) and new_prev_hypotheses:
+                    self._prev_hypotheses[slot] = new_prev_hypotheses[0]
+            except Exception:
+                pass
+
+            # Extract text and enqueue as an interim
+            h0 = transcribed_texts[0] if isinstance(transcribed_texts, (list, tuple)) else transcribed_texts
+            text = ""
+            try:
+                if hasattr(h0, "text"):
+                    text = str(getattr(h0, "text", "") or "")
+                else:
+                    text = str(h0 or "")
+            except Exception:
+                text = ""
+
+            try:
+                self.results.put_nowait((sid, text, int(time.time() * 1000)))
+            except asyncio.QueueFull:
+                pass
+            return text

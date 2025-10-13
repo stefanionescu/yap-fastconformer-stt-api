@@ -74,6 +74,11 @@ async def handler(websocket):
                 try:
                     msg = json.loads(message)
                     if msg.get("op") == "close":
+                        # Flush tail frames once before closing the stream
+                        try:
+                            await BATCHER.flush_stream(sid)
+                        except Exception:
+                            pass
                         break
                 except Exception:
                     pass
