@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--n", type=int, default=20, help="Total sessions")
     ap.add_argument("--concurrency", type=int, default=5, help="Max concurrent sessions")
     ap.add_argument("--file", type=str, default="mid.wav", help="Audio file (under samples/ or absolute)")
-    ap.add_argument("--rtf", type=float, default=1.0, help="Real-time factor (1.0=realtime, higher=faster)")
+    ap.add_argument("--rtf", type=float, default=1.0, help="Real-time factor (1.0-10.0; 10=faster)")
     ap.add_argument("--print-partials", action="store_true", help="Print partials during sessions")
     return ap.parse_args()
 

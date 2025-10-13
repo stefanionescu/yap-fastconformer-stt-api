@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server", default=default_server, help="host:port or ws://host:port")
     parser.add_argument("--secure", action="store_true", help="Use WSS")
     parser.add_argument("--file", type=str, default="mid.wav", help="Audio file (absolute path or under samples/)")
-    parser.add_argument("--rtf", type=float, default=1.0, help="Real-time factor (1.0=realtime, >1 faster)")
+    parser.add_argument("--rtf", type=float, default=1.0, help="Real-time factor (1.0-10.0; 10=faster)")
     parser.add_argument("--full-text", action="store_true", help="Print full final text (default: first 50 chars)")
     parser.add_argument("--print-partials", action="store_true", help="Print partial updates")
     return parser.parse_args()

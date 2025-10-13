@@ -1,4 +1,4 @@
-## FastConformer Streaming ASR (NeMo)
+# Yap FastConformer Streaming ASR (NeMo)
 
 This is a production-ready, self-hosted streaming ASR server for the NVIDIA NeMo FastConformer Hybrid Large (cache-aware streaming) model:
 
@@ -75,28 +75,6 @@ docker run --rm -it --gpus all -p 8080:8080 \
   fastconf-streaming:latest
 ```
 
-### Performance tuning
-
-- Batching: Increase `ASR_MAX_BATCH` until GPU saturates (monitor step latency and queueing).
-- Look-ahead: `ASR_ATT_CTX=70,1` is a good default (80 ms worst, ~40 ms avg). `70,0` can reduce latency further with some WER cost.
-- Tick period: `ASR_STEP_MS=20` (50 Hz) balances server overhead and responsiveness. 10 ms is possible at higher CPU/GPU overhead.
-- Scale out: Run multiple containers and sticky-route sessions; one GPU per process is simplest.
-
-### Build details
-
-- Base: `nvidia/cuda:12.1.1-cudnn-runtime-ubuntu22.04`
-- PyTorch: `2.3.1+cu121`, Torchaudio matched
-- NeMo: `nemo_toolkit[asr]==1.23.0`
-- Optional model prefetch during build to avoid cold start
-
-### Known limitations
-
-- Cache-aware streaming path uses fp32 internally and forces fp32 in several layers, so fp16/bf16/INT8 are not supported here.
-- If you need INT8/FP8 with TensorRT, you must export and implement a custom stateful streaming loop; parity with NeMo’s cache-aware step is not guaranteed.
-
-### References
-
-
 ## Non-Docker deployment (scripts)
 
 If you prefer running directly on a machine without Docker, use the scripts under `scripts/`.
@@ -104,12 +82,12 @@ If you prefer running directly on a machine without Docker, use the scripts unde
 1) Create and activate a virtualenv, then install dependencies:
 
 ```bash
-bash scripts/create_venv.sh
-bash scripts/install_deps.sh
+bash scripts/common/create_venv.sh
+bash scripts/common/install_deps.sh
 source .venv/bin/activate
 ```
 
-2) Configure runtime using `scripts/env.sh` (edit as needed):
+2) Configure runtime using `scripts/common/env.sh` (edit as needed):
 
 ```bash
 $EDITOR scripts/env.sh
@@ -134,7 +112,34 @@ Notes:
 - Single `requirements.txt` at repo root includes NeMo + test/runtime deps.
 - Docker build ignores `scripts/` and `.venv/` via `.dockerignore` (Docker path is independent).
 
+### Cleanup / stop
+
+To stop the local server and purge caches (HF, pip, torch):
+
+```bash
+bash scripts/stop.sh
+# or, to also remove the virtualenv
+bash scripts/stop.sh --nuke-venv
+```
+
 - NVIDIA model card: [Hugging Face](https://huggingface.co/nvidia/stt_en_fastconformer_hybrid_large_streaming_multi)
 - NeMo toolkit: `https://github.com/NVIDIA/NeMo`
 
+### Performance tuning
 
+- Batching: Increase `ASR_MAX_BATCH` until GPU saturates (monitor step latency and queueing).
+- Look-ahead: `ASR_ATT_CTX=70,1` is a good default (80 ms worst, ~40 ms avg). `70,0` can reduce latency further with some WER cost.
+- Tick period: `ASR_STEP_MS=20` (50 Hz) balances server overhead and responsiveness. 10 ms is possible at higher CPU/GPU overhead.
+- Scale out: Run multiple containers and sticky-route sessions; one GPU per process is simplest.
+
+### Build details
+
+- Base: `nvidia/cuda:12.1.1-cudnn-runtime-ubuntu22.04`
+- PyTorch: `2.3.1+cu121`, Torchaudio matched
+- NeMo: `nemo_toolkit[asr]==1.23.0`
+- Optional model prefetch during build to avoid cold start
+
+### Known limitations
+
+- Cache-aware streaming path uses fp32 internally and forces fp32 in several layers, so fp16/bf16/INT8 are not supported here.
+- If you need INT8/FP8 with TensorRT, you must export and implement a custom stateful streaming loop; parity with NeMo’s cache-aware step is not guaranteed.

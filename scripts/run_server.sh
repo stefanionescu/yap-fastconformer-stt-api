@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Load env + helpers
-# shellcheck source=common.sh
-source "$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )/common.sh"
+# shellcheck source=common/common.sh
+source "$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )/common/common.sh"
 
 activate_venv
 

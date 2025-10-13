@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )"
+REPO_ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/../.." &> /dev/null && pwd )"
 
 if [[ ! -d "${REPO_ROOT}/.venv" ]]; then
-  echo "[install] Missing venv. Run scripts/create_venv.sh first." >&2
+  echo "[install] Missing venv. Run scripts/common/create_venv.sh first." >&2
   exit 2
 fi
 

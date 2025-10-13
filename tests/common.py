@@ -121,6 +121,15 @@ async def run_streaming_session(
     secure: bool = False,
     print_partials: bool = False,
 ) -> Dict[str, object]:
+    # Clamp RTF to [1.0, 10.0]
+    try:
+        rtf = float(rtf)
+    except Exception:
+        rtf = 1.0
+    if rtf < 1.0:
+        rtf = 1.0
+    elif rtf > 10.0:
+        rtf = 10.0
     url = build_ws_url(server, secure=secure)
     sid = uuid.uuid4().hex
 
