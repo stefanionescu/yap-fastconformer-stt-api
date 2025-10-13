@@ -8,6 +8,20 @@ import numpy as np
 import torch
 
 
+# ---- helpers for nested cache tensors ----
+def _to_index_tensor(idx_list, device):
+    return torch.tensor(idx_list, dtype=torch.long, device=device)
+
+def _rec_zero_slot(x, slot):
+    if x is None:
+        return
+    if torch.is_tensor(x):
+        x[slot].zero_()
+        return
+    if isinstance(x, (list, tuple)):
+        for e in x:
+            _rec_zero_slot(e, slot)
+
 class StreamState:
     __slots__ = ("sid", "sr", "buf", "closed")
     def __init__(self, sid: str, sr: int):
@@ -46,7 +60,7 @@ class GlobalBatcher:
         model,
         step_ms: int = 20,
         sample_rate: int = 16000,
-        max_slots: int = 128,
+        max_slots: int = 64,
         device: torch.device = torch.device("cuda:0"),
         verbose: bool = False,
     ):
@@ -64,14 +78,21 @@ class GlobalBatcher:
         decoding_module = getattr(self.model, "decoding", None)
         self._tokenizer = getattr(self.model, "tokenizer", None)
         self._blank_id = getattr(decoding_module, "blank_id", None)
-        self._debug_limit = 64
+        self._debug_limit = 256
         self._debug_count = 0
 
         (self._cache_ch, self._cache_t, self._cache_ch_len) = \
             self.model.encoder.get_initial_cache_state(batch_size=self.max_slots)
+        self._log_debug(
+            "initial cache shapes ch=%s t=%s ch_len=%s" % (
+                self._describe_cache(self._cache_ch),
+                self._describe_cache(self._cache_t),
+                self._describe_cache(self._cache_ch_len),
+            )
+        )
 
-        # Track global streaming steps to control pre-encoded frame dropping
-        self._global_step: int = 0
+        # Track per-slot streaming steps to control cohorting
+        self._slot_step: List[int] = [0 for _ in range(self.max_slots)]
 
         # Maintain RNNT decoder streaming state across ticks, per slot
         # These are fed back into conformer_stream_step via previous_hypotheses
@@ -124,6 +145,16 @@ class GlobalBatcher:
             self._prev_hypotheses[slot] = None
             self._prev_pred_out[slot] = None
             self._last_text[slot] = ""
+            # Reset caches and slot step
+            _rec_zero_slot(self._cache_ch, slot)
+            _rec_zero_slot(self._cache_t, slot)
+            _rec_zero_slot(self._cache_ch_len, slot)
+            # Reset pre-encode feature cache for this slot
+            try:
+                self._pre_cache[slot].zero_()
+            except Exception:
+                pass
+            self._slot_step[slot] = 0
 
     async def remove_stream(self, sid: str):
         async with self._lock:
@@ -133,6 +164,15 @@ class GlobalBatcher:
                 # Clear any lingering streaming decoder state
                 self._prev_hypotheses[slot] = None
                 self._prev_pred_out[slot] = None
+                # Reset caches and slot step for reuse safety
+                self._slot_step[slot] = 0
+                _rec_zero_slot(self._cache_ch, slot)
+                _rec_zero_slot(self._cache_t, slot)
+                _rec_zero_slot(self._cache_ch_len, slot)
+                try:
+                    self._pre_cache[slot].zero_()
+                except Exception:
+                    pass
                 self._free_slots.append(slot)
                 self._free_slots.sort()
             if slot is not None:
@@ -181,8 +221,9 @@ class GlobalBatcher:
             sids = list(self._streams.keys())
             slots = [self._sid2slot[sid] for sid in sids]
 
-            chunks = []
-            lens = []
+            # Collect audio for all streams (pad to step size; lens 0 if no audio)
+            chunks: List[np.ndarray] = []
+            lens: List[int] = []
             for sid in sids:
                 st = self._streams[sid]
                 chunk, n = st.pop_chunk(self.samples_per_step)
@@ -190,185 +231,194 @@ class GlobalBatcher:
                     chunks.append(np.zeros((self.samples_per_step,), dtype=np.float32))
                     lens.append(0)
                 else:
-                    if chunk.shape[0] != self.samples_per_step:
-                        if chunk.shape[0] < self.samples_per_step:
-                            pad = np.zeros((self.samples_per_step - chunk.shape[0],), dtype=np.float32)
-                            chunk = np.concatenate([chunk, pad], axis=0)
-                        else:
-                            chunk = chunk[: self.samples_per_step]
+                    if chunk.shape[0] < self.samples_per_step:
+                        pad = np.zeros((self.samples_per_step - chunk.shape[0],), dtype=np.float32)
+                        chunk = np.concatenate([chunk, pad], axis=0)
+                    else:
+                        chunk = chunk[: self.samples_per_step]
                     chunks.append(chunk)
                     lens.append(self.samples_per_step)
 
-            audio = torch.from_numpy(np.stack(chunks, axis=0)).to(self.device, dtype=torch.float32)
-            lengths_samples = torch.tensor(lens, dtype=torch.int64, device=self.device)
+            B = len(sids)
+            audio_full = torch.from_numpy(np.stack(chunks, 0)).to(self.device, dtype=torch.float32)
+            lengths_full = torch.tensor(lens, dtype=torch.int64, device=self.device)
 
-            # Select active subset (those that delivered nonzero audio this tick)
-            active = [i for i, L in enumerate(lens) if L > 0]
-            if not active:
-                return
+            # Split into cohorts by per-slot step (0 → newcomers)
+            new_idxs: List[int] = []
+            act_idxs: List[int] = []
+            for i, slot in enumerate(slots):
+                if self._slot_step[slot] == 0:
+                    new_idxs.append(i)
+                else:
+                    act_idxs.append(i)
 
-            act_slots = [slots[i] for i in active]
-            active_idx = torch.tensor(active, dtype=torch.long, device=self.device)
-            audio_act = audio.index_select(0, active_idx)
-            len_act_samples = lengths_samples.index_select(0, active_idx)
+            scfg = self.model.encoder.streaming_cfg
+            drop_act = int(getattr(scfg, "drop_extra_pre_encoded", 0))
 
-            # 1) Waveform -> features (B_act, n_mels, T_frames)
-            with torch.no_grad():
-                feats_act, feat_len_act = self.model.preprocessor(
-                    input_signal=audio_act, length=len_act_samples
-                )
-
-            # Normalise feature tensor layout to (B, n_mels, T)
             expected_feat_dim = self._pre_cache.size(1)
-            if feats_act.ndim == 3:
-                if feats_act.size(1) != expected_feat_dim and feats_act.size(2) == expected_feat_dim:
-                    feats_act = feats_act.transpose(1, 2).contiguous()
-                elif feats_act.size(1) != expected_feat_dim and feats_act.size(-1) != expected_feat_dim:
-                    self._log_debug(
-                        f"unexpected feature dims {tuple(feats_act.shape)}, expected {expected_feat_dim}",
-                        force=True,
-                    )
 
-            if feat_len_act.ndim > 1:
-                feat_len_act = feat_len_act.view(-1)
-            try:
-                feat_len_list = feat_len_act.detach().cpu().tolist()
-            except Exception:
-                feat_len_list = []
-
-            # 2) Concat pre-encode cache on time dim
-            act_slots_idx = torch.tensor(act_slots, dtype=torch.long, device=self.device)
-            pre_cache_sel = self._pre_cache.index_select(0, act_slots_idx)
-            shape_msg = (
-                "stream step shapes audio=%s feats=%s pre_cache=%s feat_len=%s" % (
-                    tuple(audio_act.shape),
-                    tuple(feats_act.shape),
-                    tuple(pre_cache_sel.shape),
-                    feat_len_list,
-                )
-            )
-            self._log_debug(shape_msg)
-            if feats_act.shape[1] != pre_cache_sel.shape[1]:
-                raise RuntimeError(
-                    f"Feature dim mismatch PRE={tuple(pre_cache_sel.shape)} FEAT={tuple(feats_act.shape)}"
-                )
-            try:
-                feats_cat = torch.cat([pre_cache_sel, feats_act], dim=-1)
-            except Exception as exc:
-                self._log_debug(f"torch.cat failure: {exc} | {shape_msg}", force=True)
-                raise
-            proc_len_frames = feat_len_act + pre_cache_sel.size(-1)
-
-            def _gather_rows(t: Optional[torch.Tensor], idx: List[int]) -> Optional[torch.Tensor]:
-                if t is None:
-                    return None
-                return t.index_select(0, torch.tensor(idx, dtype=torch.long, device=t.device))
-
-            cache_ch = _gather_rows(self._cache_ch, act_slots)
-            cache_t = _gather_rows(self._cache_t, act_slots)
-            cache_ch_len = _gather_rows(self._cache_ch_len, act_slots)
-
-            prev_hyp_batch: List[Optional[object]] = [self._prev_hypotheses[s] for s in act_slots]
-            prev_pred_out_batch: List[Optional[object]] = [self._prev_pred_out[s] for s in act_slots]
-
-            with torch.inference_mode():
-                (
-                    pred_out_stream,
-                    transcribed_texts,
-                    cache_ch_new,
-                    cache_t_new,
-                    cache_ch_len_new,
-                    new_prev_hypotheses,
-                ) = self.model.conformer_stream_step(
-                    processed_signal=feats_cat,
-                    processed_signal_length=proc_len_frames,
-                    cache_last_channel=cache_ch,
-                    cache_last_time=cache_t,
-                    cache_last_channel_len=cache_ch_len,
-                    keep_all_outputs=False,
-                    previous_hypotheses=prev_hyp_batch,
-                    previous_pred_out=prev_pred_out_batch,
-                    drop_extra_pre_encoded=(
-                        0 if self._global_step == 0
-                        else int(self.model.encoder.streaming_cfg.drop_extra_pre_encoded)
-                    ),
-                    return_transcription=True,
-                )
-            self._global_step += 1
-
-            self._log_debug(
-                "stream step outputs="
-                f"{self._short_repr(transcribed_texts)}"
-            )
-
-            def _scatter_rows(dst: Optional[torch.Tensor], src: Optional[torch.Tensor], idx: List[int]):
-                if dst is None or src is None:
+            def run_cohort(idxs: List[int], drop: int):
+                if not idxs:
                     return
-                dst.index_copy_(0, torch.tensor(idx, dtype=torch.long, device=dst.device), src)
+                slot_rows: List[int] = [slots[i] for i in idxs]
+                idx_t = _to_index_tensor(slot_rows, self.device)
+                sel_t = _to_index_tensor(idxs, self.device)
 
-            _scatter_rows(self._cache_ch, cache_ch_new, act_slots)
-            _scatter_rows(self._cache_t, cache_t_new, act_slots)
-            _scatter_rows(self._cache_ch_len, cache_ch_len_new, act_slots)
+                audio = audio_full.index_select(0, sel_t)
+                lengths = lengths_full.index_select(0, sel_t)
 
-            # 4) Update per-slot pre-encode cache: keep last K feature frames
-            K = int(self._pre_cache_frames)
-            if K > 0:
-                total_frames = feats_cat.size(-1)
-                if total_frames >= K:
-                    tail = feats_cat[:, :, -K:]
-                else:
-                    pad = torch.zeros(
-                        (feats_cat.size(0), feats_cat.size(1), K - total_frames),
-                        dtype=feats_cat.dtype,
-                        device=feats_cat.device,
+                # Waveform -> features
+                with torch.no_grad():
+                    feats, feat_len = self.model.preprocessor(input_signal=audio, length=lengths)
+
+                # Normalize to (B, n_mels, T)
+                if feats.ndim == 3:
+                    if feats.size(1) != expected_feat_dim and feats.size(2) == expected_feat_dim:
+                        feats = feats.transpose(1, 2).contiguous()
+                    elif feats.size(1) != expected_feat_dim and feats.size(-1) != expected_feat_dim:
+                        self._log_debug(
+                            f"unexpected feature dims {tuple(feats.shape)}, expected {expected_feat_dim}",
+                            force=True,
+                        )
+
+                if feat_len.ndim > 1:
+                    feat_len = feat_len.view(-1)
+
+                # Pre-encode cache concat on time dim
+                pre_cache_sel = self._pre_cache.index_select(0, idx_t)
+                shape_msg = (
+                    "stream step shapes audio=%s feats=%s pre_cache=%s feat_len=%s" % (
+                        tuple(audio.shape),
+                        tuple(feats.shape),
+                        tuple(pre_cache_sel.shape),
+                        (feat_len.detach().cpu().tolist() if hasattr(feat_len, "detach") else []),
                     )
-                    tail = torch.cat([pad, feats_cat], dim=-1)
-                self._pre_cache.index_copy_(0, act_slots_idx, tail)
-
-            # Persist updated RNNT hypotheses back to their slots (only active)
-            try:
-                if isinstance(new_prev_hypotheses, (list, tuple)):
-                    for i, slot in enumerate(act_slots):
-                        if i < len(new_prev_hypotheses):
-                            self._prev_hypotheses[slot] = new_prev_hypotheses[i]
-                else:
-                    for slot in act_slots:
-                        self._prev_hypotheses[slot] = None
-            except Exception:
-                for slot in act_slots:
-                    self._prev_hypotheses[slot] = None
-
-            # Persist updated RNNT predictor state back to their slots (only active)
-            try:
-                if isinstance(pred_out_stream, (list, tuple)):
-                    for i, slot in enumerate(act_slots):
-                        if i < len(pred_out_stream):
-                            self._prev_pred_out[slot] = pred_out_stream[i]
-                else:
-                    for slot in act_slots:
-                        self._prev_pred_out[slot] = pred_out_stream
-            except Exception:
-                for slot in act_slots:
-                    self._prev_pred_out[slot] = None
-
-            now_ms = int(time.time() * 1000)
-            texts = self._decode_batch_texts(transcribed_texts, len(active))
-
-            for sid, txt in zip([sids[i] for i in active], texts):
-                slot = self._sid2slot.get(sid)
-                if slot is None:
-                    continue
-                if txt and txt != self._last_text[slot]:
-                    self._last_text[slot] = txt
-                elif not txt:
-                    continue
+                )
+                self._log_debug(shape_msg)
+                if feats.shape[1] != pre_cache_sel.shape[1]:
+                    raise RuntimeError(
+                        f"Feature dim mismatch PRE={tuple(pre_cache_sel.shape)} FEAT={tuple(feats.shape)}"
+                    )
                 try:
-                    self.results.put_nowait((sid, txt, now_ms))
-                except asyncio.QueueFull:
-                    pass
+                    feats_cat = torch.cat([pre_cache_sel, feats], dim=-1)
+                except Exception as exc:
+                    self._log_debug(f"torch.cat failure: {exc} | {shape_msg}", force=True)
+                    raise
+                proc_len_frames = feat_len + pre_cache_sel.size(-1)
+
+                # Gather caches with dimension-aware helpers for this cohort
+                cache_ch = self._select_cache_rows(self._cache_ch, slot_rows)
+                cache_t = self._select_cache_rows(self._cache_t, slot_rows)
+                cache_ch_len = self._select_cache_rows(self._cache_ch_len, slot_rows)
+                self._log_debug(
+                    "cache sel shapes ch=%s t=%s ch_len=%s" % (
+                        self._describe_cache(cache_ch),
+                        self._describe_cache(cache_t),
+                        self._describe_cache(cache_ch_len),
+                    )
+                )
+
+                prev_h = [self._prev_hypotheses[slots[i]] for i in idxs]
+                prev_p = [self._prev_pred_out[slots[i]] for i in idxs]
+
+                with torch.inference_mode():
+                    (
+                        pred_out_stream,
+                        transcribed_texts,
+                        cache_ch_new,
+                        cache_t_new,
+                        cache_ch_len_new,
+                        new_prev_hypotheses,
+                    ) = self.model.conformer_stream_step(
+                        processed_signal=feats_cat,
+                        processed_signal_length=proc_len_frames,
+                        cache_last_channel=cache_ch,
+                        cache_last_time=cache_t,
+                        cache_last_channel_len=cache_ch_len,
+                        keep_all_outputs=False,
+                        previous_hypotheses=prev_h,
+                        previous_pred_out=prev_p,
+                        drop_extra_pre_encoded=int(drop),
+                        return_transcription=True,
+                    )
+
+                self._log_debug(
+                    "stream step outputs="
+                    f"{self._short_repr(transcribed_texts)}"
+                )
+
+                # Scatter caches back to full buffers (dimension-aware)
+                self._scatter_cache_rows(self._cache_ch, cache_ch_new, slot_rows)
+                self._scatter_cache_rows(self._cache_t, cache_t_new, slot_rows)
+                self._scatter_cache_rows(self._cache_ch_len, cache_ch_len_new, slot_rows)
+
+                # Update per-slot pre-encode cache: keep last K feature frames
+                K = int(self._pre_cache_frames)
+                if K > 0:
+                    total_frames = feats_cat.size(-1)
+                    if total_frames >= K:
+                        tail = feats_cat[:, :, -K:]
+                    else:
+                        pad = torch.zeros(
+                            (feats_cat.size(0), feats_cat.size(1), K - total_frames),
+                            dtype=feats_cat.dtype,
+                            device=feats_cat.device,
+                        )
+                        tail = torch.cat([pad, feats_cat], dim=-1)
+                    self._pre_cache.index_copy_(0, idx_t, tail)
+
+                # Persist RNNT states
+                try:
+                    if isinstance(new_prev_hypotheses, (list, tuple)):
+                        for j, i in enumerate(idxs):
+                            self._prev_hypotheses[slots[i]] = new_prev_hypotheses[j] if j < len(new_prev_hypotheses) else None
+                    else:
+                        for i in idxs:
+                            self._prev_hypotheses[slots[i]] = None
+                except Exception:
+                    for i in idxs:
+                        self._prev_hypotheses[slots[i]] = None
+
+                try:
+                    if isinstance(pred_out_stream, (list, tuple)):
+                        for j, i in enumerate(idxs):
+                            self._prev_pred_out[slots[i]] = pred_out_stream[j] if j < len(pred_out_stream) else None
+                    else:
+                        for i in idxs:
+                            self._prev_pred_out[slots[i]] = pred_out_stream
+                except Exception:
+                    for i in idxs:
+                        self._prev_pred_out[slots[i]] = None
+
+                # Bump slot steps
+                for i in idxs:
+                    self._slot_step[slots[i]] += 1
+
+                # Fanout text
+                now_ms = int(time.time() * 1000)
+                texts = self._decode_batch_texts(transcribed_texts, len(idxs))
+                for k, i in enumerate(idxs):
+                    sid = sids[i]
+                    slot = slots[i]
+                    txt = texts[k] if k < len(texts) else ""
+                    if slot is None:
+                        continue
+                    if txt and txt != self._last_text[slot]:
+                        self._last_text[slot] = txt
+                    elif not txt:
+                        continue
+                    try:
+                        self.results.put_nowait((sid, txt, now_ms))
+                    except asyncio.QueueFull:
+                        pass
+
+            # 1) initialize newcomers with drop=0
+            run_cohort(new_idxs, drop=0)
+            # 2) run actives with configured drop
+            run_cohort(act_idxs, drop=drop_act)
 
             if self.verbose and self._ema_step_ms is not None and (int(time.time() * 10) % 10 == 0):
-                print(f"[batcher] active={len(active)}/{self.max_slots} tick≈{self._ema_step_ms:.2f} ms")
+                print(f"[batcher] active={len(act_idxs)}/{self.max_slots} tick≈{self._ema_step_ms:.2f} ms")
 
 
     async def flush_stream(self, sid: str) -> str:
@@ -381,23 +431,17 @@ class GlobalBatcher:
             # Use just the pre-encode cache to flush tail
             pre_cache = self._pre_cache[slot:slot+1]
             proc_len = torch.tensor([pre_cache.shape[-1]], dtype=torch.int64, device=self.device)
+            cache_ch = self._select_cache_rows(self._cache_ch, [slot])
+            cache_t = self._select_cache_rows(self._cache_t, [slot])
+            cache_ch_len = self._select_cache_rows(self._cache_ch_len, [slot])
             self._log_debug(
                 "flush shapes pre_cache=%s cache_ch=%s cache_t=%s cache_len=%s" % (
                     tuple(pre_cache.shape),
-                    None if self._cache_ch is None else tuple(self._cache_ch[slot:slot+1].shape),
-                    None if self._cache_t is None else tuple(self._cache_t[slot:slot+1].shape),
-                    None if self._cache_ch_len is None else tuple(self._cache_ch_len[slot:slot+1].shape),
+                    self._describe_cache(cache_ch),
+                    self._describe_cache(cache_t),
+                    self._describe_cache(cache_ch_len),
                 )
             )
-
-            def _slice_row(t: Optional[torch.Tensor], i: int) -> Optional[torch.Tensor]:
-                if t is None:
-                    return None
-                return t[i:i+1]
-
-            cache_ch = _slice_row(self._cache_ch, slot)
-            cache_t = _slice_row(self._cache_t, slot)
-            cache_ch_len = _slice_row(self._cache_ch_len, slot)
 
             prev_h = [self._prev_hypotheses[slot]]
             prev_p = [self._prev_pred_out[slot]]
@@ -429,12 +473,9 @@ class GlobalBatcher:
             )
 
             # Write back updated caches (harmless on final)
-            if cache_ch_new is not None and self._cache_ch is not None:
-                self._cache_ch[slot:slot+1].copy_(cache_ch_new)
-            if cache_t_new is not None and self._cache_t is not None:
-                self._cache_t[slot:slot+1].copy_(cache_t_new)
-            if cache_ch_len_new is not None and self._cache_ch_len is not None:
-                self._cache_ch_len[slot:slot+1].copy_(cache_ch_len_new)
+            self._scatter_cache_rows(self._cache_ch, cache_ch_new, [slot])
+            self._scatter_cache_rows(self._cache_t, cache_t_new, [slot])
+            self._scatter_cache_rows(self._cache_ch_len, cache_ch_len_new, [slot])
 
             # Persist RNNT predictor + hypotheses for completeness
             try:
@@ -608,3 +649,44 @@ class GlobalBatcher:
         if len(text) > limit:
             return text[:limit] + "..."
         return text
+
+    def _describe_cache(self, cache) -> str:
+        if cache is None:
+            return "None"
+        if isinstance(cache, (list, tuple)):
+            inner = ",".join(self._describe_cache(c) for c in cache)
+            return f"[{inner}]"
+        if torch.is_tensor(cache):
+            return str(tuple(cache.shape))
+        return type(cache).__name__
+
+    def _cache_batch_dim(self, tensor: torch.Tensor) -> int:
+        for dim in range(tensor.dim()):
+            if tensor.size(dim) == self.max_slots:
+                return dim
+        # Default to first dimension if no explicit match
+        return 0
+
+    def _select_cache_rows(self, cache, idx: List[int]):
+        if cache is None:
+            return None
+        if isinstance(cache, (list, tuple)):
+            return type(cache)(self._select_cache_rows(c, idx) for c in cache)
+        if not torch.is_tensor(cache):
+            return cache
+        dim = self._cache_batch_dim(cache)
+        index_tensor = torch.tensor(idx, dtype=torch.long, device=cache.device)
+        return cache.index_select(dim, index_tensor)
+
+    def _scatter_cache_rows(self, dst, src, idx: List[int]) -> None:
+        if dst is None or src is None:
+            return
+        if isinstance(dst, (list, tuple)) and isinstance(src, (list, tuple)):
+            for d_sub, s_sub in zip(dst, src):
+                self._scatter_cache_rows(d_sub, s_sub, idx)
+            return
+        if not torch.is_tensor(dst) or not torch.is_tensor(src):
+            return
+        dim = self._cache_batch_dim(dst)
+        index_tensor = torch.tensor(idx, dtype=torch.long, device=dst.device)
+        dst.index_copy_(dim, index_tensor, src)

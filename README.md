@@ -4,7 +4,7 @@ Production-ready streaming ASR server using NVIDIA NeMo FastConformer Hybrid Lar
 
 **Key Features:**
 - Real-time streaming transcription with interim results
-- Global batching for high concurrency (128+ streams)
+- Global batching for high concurrency (64+ streams)
 - WebSocket protocol, VAD-agnostic
 - Docker + script deployment options
 
@@ -61,7 +61,7 @@ Notes:
 - `ASR_DECODER` (default `rnnt`) — `rnnt` or `ctc`
 - `ASR_DEVICE` (default `cuda:0`)
 - `ASR_STEP_MS` (default `20`) — batcher tick period (ms)
-- `ASR_MAX_BATCH` (default `128`) — max concurrent streams per tick
+- `ASR_MAX_BATCH` (default `64`) — max concurrent streams per tick
 
 Example override:
 
@@ -109,7 +109,7 @@ source .venv/bin/activate
 Edit `scripts/deps/env.sh` or set environment variables:
 - `ASR_HOST` (default: 0.0.0.0)
 - `ASR_PORT` (default: 8000)  
-- `ASR_MAX_BATCH` (default: 128)
+- `ASR_MAX_BATCH` (default: 64)
 - `ASR_ATT_CTX` (default: 70,1)
 - `ASR_DEVICE` (default: cuda:0)
 
