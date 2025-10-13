@@ -19,21 +19,15 @@ BATCHER: GlobalBatcher
 
 async def fanout_loop(batcher: GlobalBatcher):
     while True:
-        await asyncio.sleep(0.02)
-        out = await batcher._step_once()
-        if not out:
+        sid, text, ts = await batcher.results.get()
+        ws = CLIENTS.get(sid)
+        if ws is None:
             continue
-        sids, texts = out
-        now = int(time.time() * 1000)
-        for sid, txt in zip(sids, texts):
-            ws = CLIENTS.get(sid)
-            if ws is None:
-                continue
-            msg = {"op": "interim", "sid": sid, "text": txt, "final": False, "ts": now}
-            try:
-                await ws.send(json.dumps(msg))
-            except Exception:
-                pass
+        msg = {"op": "interim", "sid": sid, "text": text, "final": False, "ts": ts}
+        try:
+            await ws.send(json.dumps(msg))
+        except Exception:
+            pass
 
 
 async def handler(websocket):
@@ -89,7 +83,7 @@ async def main():
         decoder_type=decoder,
         device=device,
     )
-    BATCHER = GlobalBatcher(model=model, step_ms=step_ms, sample_rate=16000, max_batch=max_batch)
+    BATCHER = GlobalBatcher(model=model, step_ms=step_ms, sample_rate=16000, max_slots=max_batch)
     await BATCHER.start()
     asyncio.create_task(fanout_loop(BATCHER))
 

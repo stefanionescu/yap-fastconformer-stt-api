@@ -1,19 +1,19 @@
 from __future__ import annotations
 import asyncio
+import time
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 import torch
-from typing import Dict, List, Tuple, Optional
-from nemo.collections.asr.parts.utils.streaming_utils import CacheAwareStreamingAudioBuffer
 
 
 class StreamState:
     __slots__ = ("sid", "sr", "buf", "closed")
-
     def __init__(self, sid: str, sr: int):
         self.sid = sid
         self.sr = sr
         self.buf: List[np.ndarray] = []
-        self.closed = False
+        self.closed: bool = False
 
     def push(self, pcm16_bytes: bytes):
         arr = np.frombuffer(pcm16_bytes, dtype=np.int16).astype(np.float32) / 32768.0
@@ -27,70 +27,72 @@ class StreamState:
             return np.zeros((0,), dtype=np.float32), 0
         chunk, rest = cat[:samples], cat[samples:]
         self.buf = [rest] if rest.size else []
-        return chunk, len(chunk)
+        return chunk, int(chunk.shape[0])
 
 
 class GlobalBatcher:
-    """20ms stepping batcher feeding NeMo cache-aware streaming step."""
+    """
+    High-throughput cache-aware streaming batcher for NeMo FastConformer-Hybrid.
+
+    - Fixed slot assignment per stream → stable cache tensors
+    - 20 ms ticks (configurable)
+    - Gathers/scatters cache only for active slots
+    - Emits interims via an asyncio.Queue as (sid, text, ts_ms)
+    """
 
     def __init__(
         self,
         model,
         step_ms: int = 20,
         sample_rate: int = 16000,
-        max_batch: int = 128,
+        max_slots: int = 128,
         device: torch.device = torch.device("cuda:0"),
+        verbose: bool = False,
     ):
         self.model = model
         self.step_ms = step_ms
         self.sample_rate = sample_rate
         self.samples_per_step = int(sample_rate * step_ms / 1000)
+        self.max_slots = max_slots
         self.device = device
-        self.max_batch = max_batch
+        self.verbose = verbose
 
-        self.streams: Dict[str, StreamState] = {}
-        self.sid_to_slot: Dict[str, int] = {}
-        self.slot_to_sid: List[Optional[str]] = [None] * self.max_batch
+        self._streams: Dict[str, StreamState] = {}
+        self._sid2slot: Dict[str, int] = {}
+        self._free_slots: List[int] = list(range(max_slots))
+
+        (self._cache_ch, self._cache_t, self._cache_ch_len) = \
+            self.model.encoder.get_initial_cache_state(batch_size=self.max_slots)
+        self._prev_hypotheses = None
+        self._prev_pred_out = None
+
+        self.results: asyncio.Queue[Tuple[str, str, int]] = asyncio.Queue(maxsize=8192)
+
         self._lock = asyncio.Lock()
         self._running = False
-
-        self.cache_last_channel = None
-        self.cache_last_time = None
-        self.cache_last_channel_len = None
-        self.previous_hypotheses = None
-        self.pred_out_stream = None
-
-        self.streaming_buffer = CacheAwareStreamingAudioBuffer(
-            model=self.model,
-            online_normalization=False,
-            pad_and_drop_preencoded=False,
-        )
-
-        self.last_out: Optional[Tuple[List[str], List[str]]] = None
+        self._tick_task: Optional[asyncio.Task] = None
+        self._ema_step_ms = None
 
     async def add_stream(self, sid: str, sr: int = 16000):
         async with self._lock:
-            if sid in self.streams:
+            if sid in self._sid2slot:
                 return
-            # find free slot
-            try:
-                slot = self.slot_to_sid.index(None)
-            except ValueError:
-                # no capacity; drop the request silently
-                return
-            self.streams[sid] = StreamState(sid, sr)
-            self.sid_to_slot[sid] = slot
-            self.slot_to_sid[slot] = sid
+            if not self._free_slots:
+                raise RuntimeError("No free batcher slots; scale out or increase max_slots")
+            slot = self._free_slots.pop(0)
+            self._sid2slot[sid] = slot
+            self._streams[sid] = StreamState(sid, sr)
 
     async def remove_stream(self, sid: str):
         async with self._lock:
-            self.streams.pop(sid, None)
-            slot = self.sid_to_slot.pop(sid, None)
+            slot = self._sid2slot.pop(sid, None)
+            self._streams.pop(sid, None)
             if slot is not None:
-                self.slot_to_sid[slot] = None
+                self._free_slots.append(slot)
+                self._free_slots.sort()
 
     async def push_audio(self, sid: str, pcm16: bytes):
-        st = self.streams.get(sid)
+        st = self._streams.get(sid)
         if st:
             st.push(pcm16)
 
@@ -98,85 +100,113 @@ class GlobalBatcher:
         if self._running:
             return
         self._running = True
-        self.cache_last_channel, self.cache_last_time, self.cache_last_channel_len = self.model.encoder.get_initial_cache_state(
-            batch_size=self.max_batch
-        )
-        asyncio.create_task(self._tick())
+        self._tick_task = asyncio.create_task(self._tick_loop())
 
-    async def _tick(self):
+    async def stop(self):
+        self._running = False
+        if self._tick_task:
+            await self._tick_task
+
+    async def _tick_loop(self):
         period = self.step_ms / 1000.0
+        next_t = time.perf_counter()
         while self._running:
-            await asyncio.sleep(period)
-            await self._step_once()
+            now = time.perf_counter()
+            if now < next_t:
+                await asyncio.sleep(next_t - now)
+            start = time.perf_counter()
+            try:
+                await self._step_once()
+            except Exception as e:
+                if self.verbose:
+                    print(f"[batcher] step error: {e}")
+            end = time.perf_counter()
+            dt_ms = (end - start) * 1000.0
+            self._ema_step_ms = dt_ms if self._ema_step_ms is None else (0.9 * self._ema_step_ms + 0.1 * dt_ms)
+            next_t += period
 
     async def _step_once(self):
         async with self._lock:
-            active = any(self.slot_to_sid)
-            if not active:
-                return None
+            if not self._streams:
+                return
+
+            sids = list(self._streams.keys())
+            slots = [self._sid2slot[sid] for sid in sids]
 
             chunks = []
-            lengths = []
-            active_sids: List[str] = []
-            for slot in range(self.max_batch):
-                sid = self.slot_to_sid[slot]
-                if sid is None:
-                    chunks.append(np.zeros((self.samples_per_step,), dtype=np.float32))
-                    lengths.append(0)
-                    continue
-                st = self.streams.get(sid)
-                if st is None:
-                    chunks.append(np.zeros((self.samples_per_step,), dtype=np.float32))
-                    lengths.append(0)
-                    continue
+            lens = []
+            for sid in sids:
+                st = self._streams[sid]
                 chunk, n = st.pop_chunk(self.samples_per_step)
                 if n == 0:
                     chunks.append(np.zeros((self.samples_per_step,), dtype=np.float32))
-                    lengths.append(0)
+                    lens.append(0)
                 else:
+                    if chunk.shape[0] != self.samples_per_step:
+                        if chunk.shape[0] < self.samples_per_step:
+                            pad = np.zeros((self.samples_per_step - chunk.shape[0],), dtype=np.float32)
+                            chunk = np.concatenate([chunk, pad], axis=0)
+                        else:
+                            chunk = chunk[: self.samples_per_step]
                     chunks.append(chunk)
-                    lengths.append(n)
-                active_sids.append(sid)
+                    lens.append(self.samples_per_step)
 
-            audio = torch.from_numpy(np.stack(chunks, axis=0)).to(self.model.device, dtype=torch.float32)
-            lens = torch.tensor(lengths, dtype=torch.int64, device=self.model.device)
+            B = len(sids)
+            audio = torch.from_numpy(np.stack(chunks, axis=0)).to(self.device, dtype=torch.float32)
+            lengths = torch.tensor(lens, dtype=torch.int64, device=self.device)
+
+            def _gather_rows(t: Optional[torch.Tensor], idx: List[int]) -> Optional[torch.Tensor]:
+                if t is None:
+                    return None
+                return t.index_select(0, torch.tensor(idx, dtype=torch.long, device=t.device))
+
+            cache_ch = _gather_rows(self._cache_ch, slots)
+            cache_t = _gather_rows(self._cache_t, slots)
+            cache_ch_len = _gather_rows(self._cache_ch_len, slots)
 
             with torch.no_grad():
                 (
                     pred_out_stream,
                     transcribed_texts,
-                    self.cache_last_channel,
-                    self.cache_last_time,
-                    self.cache_last_channel_len,
-                    self.previous_hypotheses,
+                    cache_ch_new,
+                    cache_t_new,
+                    cache_ch_len_new,
+                    prev_hypotheses_new,
                 ) = self.model.conformer_stream_step(
                     processed_signal=audio,
-                    processed_signal_length=lens,
-                    cache_last_channel=self.cache_last_channel,
-                    cache_last_time=self.cache_last_time,
-                    cache_last_channel_len=self.cache_last_channel_len,
+                    processed_signal_length=lengths,
+                    cache_last_channel=cache_ch,
+                    cache_last_time=cache_t,
+                    cache_last_channel_len=cache_ch_len,
                     keep_all_outputs=True,
-                    previous_hypotheses=self.previous_hypotheses,
-                    previous_pred_out=self.pred_out_stream,
+                    previous_hypotheses=self._prev_hypotheses,
+                    previous_pred_out=self._prev_pred_out,
                     drop_extra_pre_encoded=self.model.encoder.streaming_cfg.drop_extra_pre_encoded
-                    if hasattr(self.model.encoder, "streaming_cfg")
-                    else 0,
+                        if hasattr(self.model.encoder, "streaming_cfg") else 0,
                     return_transcription=True,
                 )
-                self.pred_out_stream = pred_out_stream
 
-            texts = [h.text if hasattr(h, "text") else h for h in transcribed_texts]
-            # Fan out only for active sids with non-None slots, preserving order by slot
-            out_sids: List[str] = []
-            out_texts: List[str] = []
-            for slot in range(self.max_batch):
-                sid = self.slot_to_sid[slot]
-                if sid is None:
-                    continue
-                out_sids.append(sid)
-                out_texts.append(texts[slot])
+            self._prev_hypotheses = prev_hypotheses_new
+            self._prev_pred_out = pred_out_stream
 
-            self.last_out = (out_sids, out_texts)
-            return self.last_out
+            def _scatter_rows(dst: Optional[torch.Tensor], src: Optional[torch.Tensor], idx: List[int]):
+                if dst is None or src is None:
+                    return
+                dst.index_copy_(0, torch.tensor(idx, dtype=torch.long, device=dst.device), src)
+
+            _scatter_rows(self._cache_ch, cache_ch_new, slots)
+            _scatter_rows(self._cache_t, cache_t_new, slots)
+            _scatter_rows(self._cache_ch_len, cache_ch_len_new, slots)
+
+            now_ms = int(time.time() * 1000)
+            texts = [h.text if hasattr(h, "text") else (str(h) if h is not None else "") for h in transcribed_texts]
+            for sid, txt in zip(sids, texts):
+                try:
+                    self.results.put_nowait((sid, txt, now_ms))
+                except asyncio.QueueFull:
+                    pass
+
+            if self.verbose and self._ema_step_ms is not None and (int(time.time() * 10) % 10 == 0):
+                print(f"[batcher] active={B}/{self.max_slots} tick≈{self._ema_step_ms:.2f} ms")
 
 

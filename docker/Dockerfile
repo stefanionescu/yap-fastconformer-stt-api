@@ -37,6 +37,10 @@ COPY server /app/server
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# Copy tests and sample audio for in-container warmup/bench
+COPY tests /app/tests
+COPY samples /app/samples
+
 EXPOSE 8080
 ENTRYPOINT ["/entrypoint.sh"]
 
