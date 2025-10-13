@@ -16,8 +16,11 @@ RTF_RAW="${2:-10}"
 
 # Clamp RTF to [1,10]
 RTF_NUM=$(printf '%s' "${RTF_RAW}" | awk '{print ($0+0)}')
+if (( $(echo "${RTF_NUM} > 10" | bc -l) )); then
+  echo "[warmup] ERROR: RTF must be <= 10" >&2
+  exit 2
+fi
 if (( $(echo "${RTF_NUM} < 1" | bc -l) )); then RTF_NUM=1; fi
-if (( $(echo "${RTF_NUM} > 10" | bc -l) )); then RTF_NUM=10; fi
 RTF="${RTF_NUM}"
 
 echo "[warmup] server=${SERVER} file=${FILE_NAME} rtf=${RTF}"

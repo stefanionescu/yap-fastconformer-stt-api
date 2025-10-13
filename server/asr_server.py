@@ -1,17 +1,39 @@
 import asyncio
 import json
-import os
-import time
 from typing import Dict
 
+import torch
 import websockets
 
 from nemo_loader import load_fastconformer
 from batcher import GlobalBatcher
+from config import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_MODEL_NAME,
+    DEFAULT_ATT_CONTEXT,
+    DEFAULT_DECODER,
+    DEFAULT_DEVICE,
+    DEFAULT_STEP_MS,
+    DEFAULT_MAX_BATCH,
+)
+import os
 
 
-HOST = os.environ.get("ASR_HOST", "0.0.0.0")
-PORT = int(os.environ.get("ASR_PORT", "8080"))
+HOST = os.environ.get("ASR_HOST", DEFAULT_HOST)
+PORT = int(os.environ.get("ASR_PORT", str(DEFAULT_PORT)))
+MODEL_NAME = os.environ.get("ASR_MODEL", DEFAULT_MODEL_NAME)
+ATT_CTX_RAW = os.environ.get("ASR_ATT_CTX", f"{DEFAULT_ATT_CONTEXT[0]},{DEFAULT_ATT_CONTEXT[1]}")
+try:
+    ATT_CONTEXT = tuple(int(x) for x in ATT_CTX_RAW.split(","))
+    if len(ATT_CONTEXT) != 2:
+        ATT_CONTEXT = DEFAULT_ATT_CONTEXT
+except Exception:
+    ATT_CONTEXT = DEFAULT_ATT_CONTEXT
+DECODER = os.environ.get("ASR_DECODER", DEFAULT_DECODER)
+DEVICE = os.environ.get("ASR_DEVICE", DEFAULT_DEVICE)
+STEP_MS = int(os.environ.get("ASR_STEP_MS", str(DEFAULT_STEP_MS)))
+MAX_BATCH = int(os.environ.get("ASR_MAX_BATCH", str(DEFAULT_MAX_BATCH)))
 
 CLIENTS: Dict[str, websockets.WebSocketServerProtocol] = {}
 BATCHER: GlobalBatcher
@@ -67,23 +89,19 @@ async def handler(websocket):
 async def main():
     global BATCHER
 
-    model_name = os.environ.get(
-        "ASR_MODEL", "nvidia/stt_en_fastconformer_hybrid_large_streaming_multi"
-    )
-    att_ctx = os.environ.get("ASR_ATT_CTX", "70,1")
-    att_tuple = tuple(int(x) for x in att_ctx.split(","))
-    decoder = os.environ.get("ASR_DECODER", "rnnt")
-    device = os.environ.get("ASR_DEVICE", "cuda:0")
-    step_ms = int(os.environ.get("ASR_STEP_MS", "20"))
-    max_batch = int(os.environ.get("ASR_MAX_BATCH", "128"))
-
     model = load_fastconformer(
-        model_name=model_name,
-        att_context_size=att_tuple,
-        decoder_type=decoder,
-        device=device,
+        model_name=MODEL_NAME,
+        att_context_size=ATT_CONTEXT,
+        decoder_type=DECODER,
+        device=DEVICE,
     )
-    BATCHER = GlobalBatcher(model=model, step_ms=step_ms, sample_rate=16000, max_slots=max_batch)
+    BATCHER = GlobalBatcher(
+        model=model,
+        step_ms=STEP_MS,
+        sample_rate=16000,
+        max_slots=MAX_BATCH,
+        device=torch.device(DEVICE),
+    )
     await BATCHER.start()
     asyncio.create_task(fanout_loop(BATCHER))
 

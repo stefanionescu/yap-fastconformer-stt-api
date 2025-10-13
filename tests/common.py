@@ -126,10 +126,10 @@ async def run_streaming_session(
         rtf = float(rtf)
     except Exception:
         rtf = 1.0
+    if rtf > 10.0:
+        raise ValueError("--rtf must be <= 10.0")
     if rtf < 1.0:
         rtf = 1.0
-    elif rtf > 10.0:
-        rtf = 10.0
     url = build_ws_url(server, secure=secure)
     sid = uuid.uuid4().hex
 
