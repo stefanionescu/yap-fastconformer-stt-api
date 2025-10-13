@@ -64,6 +64,10 @@ class GlobalBatcher:
         (self._cache_ch, self._cache_t, self._cache_ch_len) = \
             self.model.encoder.get_initial_cache_state(batch_size=self.max_slots)
 
+        # Maintain RNNT decoder streaming state across ticks, per slot
+        # These are fed back into conformer_stream_step via previous_hypotheses
+        self._prev_hypotheses: List[Optional[object]] = [None for _ in range(self.max_slots)]
+
         self.results: asyncio.Queue[Tuple[str, str, int]] = asyncio.Queue(maxsize=8192)
 
         self._lock = asyncio.Lock()
@@ -80,12 +84,16 @@ class GlobalBatcher:
             slot = self._free_slots.pop(0)
             self._sid2slot[sid] = slot
             self._streams[sid] = StreamState(sid, sr)
+            # Reset streaming decoder state for this slot
+            self._prev_hypotheses[slot] = None
 
     async def remove_stream(self, sid: str):
         async with self._lock:
             slot = self._sid2slot.pop(sid, None)
             self._streams.pop(sid, None)
             if slot is not None:
+                # Clear any lingering streaming decoder state
+                self._prev_hypotheses[slot] = None
                 self._free_slots.append(slot)
                 self._free_slots.sort()
 
@@ -162,6 +170,9 @@ class GlobalBatcher:
             cache_t = _gather_rows(self._cache_t, slots)
             cache_ch_len = _gather_rows(self._cache_ch_len, slots)
 
+            # Gather per-stream RNNT hypotheses state for active slots
+            prev_hyp_batch: List[Optional[object]] = [self._prev_hypotheses[s] for s in slots]
+
             with torch.no_grad():
                 (
                     pred_out_stream,
@@ -169,7 +180,7 @@ class GlobalBatcher:
                     cache_ch_new,
                     cache_t_new,
                     cache_ch_len_new,
-                    _prev_hyp_unused,
+                    new_prev_hypotheses,
                 ) = self.model.conformer_stream_step(
                     processed_signal=audio,
                     processed_signal_length=lengths,
@@ -177,7 +188,7 @@ class GlobalBatcher:
                     cache_last_time=cache_t,
                     cache_last_channel_len=cache_ch_len,
                     keep_all_outputs=True,
-                    previous_hypotheses=None,
+                    previous_hypotheses=prev_hyp_batch,
                     previous_pred_out=None,
                     drop_extra_pre_encoded=self.model.encoder.streaming_cfg.drop_extra_pre_encoded
                         if hasattr(self.model.encoder, "streaming_cfg") else 0,
@@ -192,6 +203,21 @@ class GlobalBatcher:
             _scatter_rows(self._cache_ch, cache_ch_new, slots)
             _scatter_rows(self._cache_t, cache_t_new, slots)
             _scatter_rows(self._cache_ch_len, cache_ch_len_new, slots)
+
+            # Persist updated RNNT hypotheses back to their slots
+            try:
+                if isinstance(new_prev_hypotheses, (list, tuple)):
+                    for i, slot in enumerate(slots):
+                        # Guard against length mismatches
+                        if i < len(new_prev_hypotheses):
+                            self._prev_hypotheses[slot] = new_prev_hypotheses[i]
+                else:
+                    # Fallback: if model returns a single object per batch, clear to avoid stale state
+                    for slot in slots:
+                        self._prev_hypotheses[slot] = None
+            except Exception:
+                for slot in slots:
+                    self._prev_hypotheses[slot] = None
 
             now_ms = int(time.time() * 1000)
             texts = [h.text if hasattr(h, "text") else (str(h) if h is not None else "") for h in transcribed_texts]
