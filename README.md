@@ -15,10 +15,11 @@ Important: NeMo cache-aware streaming currently runs the model in fp32. Mixed-pr
 ```
 ./docker/      # Dockerfile + scripts
 ./server/      # NeMo loader, batcher, WebSocket server
-./client/      # Example WAV client
+./tests/       # Client, warmup, and bench utilities (WebSocket)
+./scripts/     # Non-Docker deployment scripts (venv + env.sh)
 ```
 
-### Quickstart
+### Quickstart (Docker)
 
 1) Build the image
 
@@ -34,13 +35,13 @@ bash docker/run.sh
 
 The server listens on `ws://localhost:8080`.
 
-3) Try the example client
+3) Try client/warmup/bench (from host)
 
 ```bash
-python client/ws_client_wav.py /path/to/16khz_mono.wav ws://localhost:8080 demo1
+python tests/warmup.py --server 127.0.0.1:8080 --file samples/mid.wav --rtf 1000 --full-text
+python tests/client.py  --server 127.0.0.1:8080 --file samples/mid.wav --rtf 1.0 --print-partials
+python tests/bench.py   --server 127.0.0.1:8080 --file samples/mid.wav --rtf 1.0 --n 20 --concurrency 5
 ```
-
-You will see JSON `interim` messages printed as the audio streams.
 
 ### WebSocket Protocol
 
@@ -94,6 +95,44 @@ docker run --rm -it --gpus all -p 8080:8080 \
 - If you need INT8/FP8 with TensorRT, you must export and implement a custom stateful streaming loop; parity with NeMo’s cache-aware step is not guaranteed.
 
 ### References
+
+
+## Non-Docker deployment (scripts)
+
+If you prefer running directly on a machine without Docker, use the scripts under `scripts/`.
+
+1) Create and activate a virtualenv, then install dependencies:
+
+```bash
+bash scripts/create_venv.sh
+bash scripts/install_deps.sh
+source .venv/bin/activate
+```
+
+2) Configure runtime using `scripts/env.sh` (edit as needed):
+
+```bash
+$EDITOR scripts/env.sh
+```
+
+3) Start the server:
+
+```bash
+bash scripts/run_server.sh
+# listens on ws://${ASR_HOST}:${ASR_PORT} (defaults 0.0.0.0:8080)
+```
+
+4) Warmup / test from the same machine:
+
+```bash
+bash scripts/warmup.sh mid.wav 1000
+python tests/client.py --server 127.0.0.1:8080 --file samples/mid.wav --rtf 1.0 --print-partials
+python tests/bench.py  --server 127.0.0.1:8080 --file samples/mid.wav --rtf 1.0 --n 10 --concurrency 3
+```
+
+Notes:
+- Single `requirements.txt` at repo root includes NeMo + test/runtime deps.
+- Docker build ignores `scripts/` and `.venv/` via `.dockerignore` (Docker path is independent).
 
 - NVIDIA model card: [Hugging Face](https://huggingface.co/nvidia/stt_en_fastconformer_hybrid_large_streaming_multi)
 - NeMo toolkit: `https://github.com/NVIDIA/NeMo`

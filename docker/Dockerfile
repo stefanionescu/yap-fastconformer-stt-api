@@ -21,9 +21,9 @@ RUN pip install --no-cache-dir torch==2.3.1+cu121 torchaudio==2.3.1+cu121 --extr
 
 WORKDIR /app
 
-# Install server requirements (includes NeMo)
-COPY server/requirements.txt /app/server/requirements.txt
-RUN pip install --no-cache-dir -r /app/server/requirements.txt
+# Install requirements from repo root (includes NeMo and runtime deps)
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Optional: prefetch model to reduce cold start
 RUN python - <<'PY'
