@@ -1,4 +1,4 @@
-# FastConformer Streaming ASR Server
+# Yap FastConformer Streaming ASR Server
 
 Production-ready streaming ASR server using NVIDIA NeMo FastConformer Hybrid Large with cache-aware streaming.
 

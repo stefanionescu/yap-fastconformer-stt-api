@@ -47,6 +47,20 @@ REPO_ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd
 
 # Background deployment function
 deploy_background() {
+  # Self-initialize in the background shell to avoid relying on parent-shell state
+  REPO_ROOT="${REPO_ROOT:-$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )}"
+  LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs}"
+  RUN_DIR="${RUN_DIR:-${REPO_ROOT}/.run}"
+  LOG_FILE="${LOG_FILE:-${LOG_DIR}/asr_server.log}"
+  PID_FILE="${PID_FILE:-${RUN_DIR}/asr_server.pid}"
+  RUN_WARMUP="${RUN_WARMUP:-0}"
+
+  mkdir -p "${LOG_DIR}" "${RUN_DIR}"
+
+  # Load env + helpers (provides activate_venv and loads env.sh if present)
+  # shellcheck source=deps/common.sh
+  source "${REPO_ROOT}/scripts/deps/common.sh"
+
   echo "[deploy] $(date): Background worker started" >> "${LOG_FILE}"
 
   # Check HF_TOKEN is set
@@ -99,8 +113,8 @@ deploy_background() {
   wait "${SERVER_PID}"
 }
 
-# Run deployment in background
-nohup bash -c "$(declare -f deploy_background); deploy_background" &
+# Run deployment in background (pass critical vars explicitly to the subshell)
+nohup bash -c "RUN_WARMUP=${RUN_WARMUP} REPO_ROOT=${REPO_ROOT} LOG_DIR=${LOG_DIR} RUN_DIR=${RUN_DIR} LOG_FILE=${LOG_FILE} PID_FILE=${PID_FILE}; $(declare -f deploy_background); deploy_background" &
 DEPLOY_PID=$!
 disown "${DEPLOY_PID}" || true
 
