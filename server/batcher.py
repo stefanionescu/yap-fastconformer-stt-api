@@ -60,6 +60,9 @@ class GlobalBatcher:
         self._streams: Dict[str, StreamState] = {}
         self._sid2slot: Dict[str, int] = {}
         self._free_slots: List[int] = list(range(max_slots))
+        decoding_module = getattr(self.model, "decoding", None)
+        self._tokenizer = getattr(self.model, "tokenizer", None)
+        self._blank_id = getattr(decoding_module, "blank_id", None)
 
         (self._cache_ch, self._cache_t, self._cache_ch_len) = \
             self.model.encoder.get_initial_cache_state(batch_size=self.max_slots)
@@ -79,6 +82,9 @@ class GlobalBatcher:
         self._running = False
         self._tick_task: Optional[asyncio.Task] = None
         self._ema_step_ms = None
+
+        # Track last emitted transcript per slot to avoid redundant queue traffic
+        self._last_text: List[str] = ["" for _ in range(self.max_slots)]
 
         # --- Pre-encode feature cache (features) per slot ---
         try:
@@ -114,6 +120,7 @@ class GlobalBatcher:
             # Reset streaming decoder state for this slot
             self._prev_hypotheses[slot] = None
             self._prev_pred_out[slot] = None
+            self._last_text[slot] = ""
 
     async def remove_stream(self, sid: str):
         async with self._lock:
@@ -125,6 +132,8 @@ class GlobalBatcher:
                 self._prev_pred_out[slot] = None
                 self._free_slots.append(slot)
                 self._free_slots.sort()
+            if slot is not None:
+                self._last_text[slot] = ""
 
     async def push_audio(self, sid: str, pcm16: bytes):
         st = self._streams.get(sid)
@@ -299,17 +308,16 @@ class GlobalBatcher:
                     self._prev_pred_out[slot] = None
 
             now_ms = int(time.time() * 1000)
-            texts: List[str] = []
-            try:
-                for h in transcribed_texts:
-                    if hasattr(h, "text"):
-                        texts.append(str(getattr(h, "text", "") or ""))
-                    else:
-                        texts.append(str(h or ""))
-            except Exception:
-                texts = [""] * len(active)
+            texts = self._decode_batch_texts(transcribed_texts, len(active))
 
             for sid, txt in zip([sids[i] for i in active], texts):
+                slot = self._sid2slot.get(sid)
+                if slot is None:
+                    continue
+                if txt and txt != self._last_text[slot]:
+                    self._last_text[slot] = txt
+                elif not txt:
+                    continue
                 try:
                     self.results.put_nowait((sid, txt, now_ms))
                 except asyncio.QueueFull:
@@ -390,16 +398,126 @@ class GlobalBatcher:
             # Extract text and enqueue as an interim
             h0 = transcribed_texts[0] if isinstance(transcribed_texts, (list, tuple)) else transcribed_texts
             text = ""
-            try:
-                if hasattr(h0, "text"):
-                    text = str(getattr(h0, "text", "") or "")
+            text = self._decode_single_text(h0)
+            slot = self._sid2slot.get(sid)
+            if slot is not None:
+                if text:
+                    self._last_text[slot] = text
                 else:
-                    text = str(h0 or "")
-            except Exception:
-                text = ""
+                    text = self._last_text[slot]
 
             try:
                 self.results.put_nowait((sid, text, int(time.time() * 1000)))
             except asyncio.QueueFull:
                 pass
             return text
+
+    def _decode_single_text(self, hyp) -> str:
+        """Best-effort conversion of a NeMo streaming hypothesis into plain text."""
+        if hyp is None:
+            return ""
+
+        # Direct access for dict-style payloads
+        if isinstance(hyp, dict):
+            for key in ("text", "transcript", "transcription"):
+                if hyp.get(key):
+                    return str(hyp[key])
+            hyp = hyp.get("hypothesis") or hyp.get("hypotheses") or hyp
+            if isinstance(hyp, (list, tuple)):
+                if not hyp:
+                    return ""
+                hyp = hyp[0]
+
+        # Unwrap list/tuple containers (e.g. beam hypotheses)
+        if isinstance(hyp, (list, tuple)):
+            for item in hyp:
+                txt = self._decode_single_text(item)
+                if txt:
+                    return txt
+            return ""
+
+        # If the hypothesis already exposes text, trust it.
+        txt = getattr(hyp, "text", None)
+        if txt:
+            return str(txt)
+
+        # Attempt to leverage model decode helpers if available
+        for decode_owner in (self.model, getattr(self.model, "decoding", None)):
+            decode_fn = getattr(decode_owner, "decode_hypothesis", None)
+            if callable(decode_fn):
+                try:
+                    decoded = decode_fn([hyp])
+                    if decoded:
+                        candidate = decoded[0]
+                        if candidate is hyp:
+                            continue
+                        if isinstance(candidate, (list, tuple)):
+                            # Some helpers return nested structures
+                            candidate = next((c for c in candidate if c), "")
+                        if isinstance(candidate, (dict, list, tuple)):
+                            txt_candidate = self._decode_single_text(candidate)
+                            if txt_candidate:
+                                return txt_candidate
+                        elif candidate:
+                            return str(candidate)
+                except Exception:
+                    pass
+
+        # Convert token IDs → text via tokenizer as a fallback
+        tokens = getattr(hyp, "tokens", None)
+        if tokens is None:
+            tokens = getattr(hyp, "y_sequence", None)
+        if tokens is not None:
+            if isinstance(tokens, torch.Tensor):
+                tokens = tokens.detach().cpu().tolist()
+            elif hasattr(tokens, "cpu"):
+                tokens = tokens.cpu().tolist()
+            elif isinstance(tokens, np.ndarray):
+                tokens = tokens.tolist()
+            if isinstance(tokens, list):
+                if tokens and isinstance(tokens[0], (list, tuple)):
+                    tokens = list(tokens[0])
+                filtered: List[int] = []
+                for t in tokens:
+                    if isinstance(t, (np.integer, int)):
+                        tid = int(t)
+                        if self._blank_id is not None and tid == self._blank_id:
+                            continue
+                        filtered.append(tid)
+                tokens = filtered
+                try:
+                    if self._tokenizer and hasattr(self._tokenizer, "ids_to_text"):
+                        return str(self._tokenizer.ids_to_text(tokens))
+                    if self._tokenizer and hasattr(self._tokenizer, "ids2text"):
+                        return str(self._tokenizer.ids2text(tokens))
+                except Exception:
+                    pass
+
+        return ""
+
+    def _decode_batch_texts(self, outputs, expected: int) -> List[str]:
+        if expected <= 0:
+            return []
+        if outputs is None:
+            return ["" for _ in range(expected)]
+
+        items: List[object]
+        if isinstance(outputs, dict):
+            for key in ("text", "texts", "transcripts", "transcriptions", "hypotheses"):
+                if key in outputs:
+                    outputs = outputs[key]
+                    break
+
+        if isinstance(outputs, torch.Tensor):
+            items = outputs.detach().cpu().tolist()
+        elif isinstance(outputs, (list, tuple)):
+            items = list(outputs)
+        else:
+            items = [outputs]
+
+        # Flatten single-element container patterns common in NeMo beams
+        if len(items) == 1 and isinstance(items[0], (list, tuple)) and len(items[0]) == expected:
+            items = list(items[0])
+
+        texts = [self._decode_single_text(items[i]) if i < len(items) else "" for i in range(expected)]
+        return texts
