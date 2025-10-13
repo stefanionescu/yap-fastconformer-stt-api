@@ -52,21 +52,47 @@ if [[ -f "${PID_FILE}" ]]; then
   fi
 fi
 
-echo "[deploy] Starting ASR server in background on ws://${ASR_HOST:-0.0.0.0}:${ASR_PORT:-8000}"
-nohup bash "${REPO_ROOT}/scripts/run/start.sh" >> "${LOG_FILE}" 2>&1 &
-NEW_PID=$!
-echo "${NEW_PID}" > "${PID_FILE}"
-disown "${NEW_PID}" || true
+echo "[deploy] =============================================="
+echo "[deploy] Starting deployment in background..."
+echo "[deploy] You can safely Ctrl-C to exit log following"
+echo "[deploy] The server will continue running in background"
+echo "[deploy] Logs: ${LOG_FILE}"
+echo "[deploy] To follow logs later: tail -f ${LOG_FILE}"
+echo "[deploy] =============================================="
 
-echo "[deploy] pid=${NEW_PID}  log=${LOG_FILE}"
+# Background deployment function
+deploy_background() {
+  echo "[deploy] $(date): Starting ASR server on ws://${ASR_HOST:-0.0.0.0}:${ASR_PORT:-8000}" >> "${LOG_FILE}"
+  
+  # Start server and capture its PID
+  bash "${REPO_ROOT}/scripts/run/start.sh" >> "${LOG_FILE}" 2>&1 &
+  SERVER_PID=$!
+  echo "${SERVER_PID}" > "${PID_FILE}"
+  
+  echo "[deploy] $(date): Server started with PID=${SERVER_PID}" >> "${LOG_FILE}"
+  
+  if [[ ${RUN_WARMUP} -eq 1 ]]; then
+    echo "[deploy] $(date): Waiting 3s for server startup..." >> "${LOG_FILE}"
+    sleep 3
+    echo "[deploy] $(date): Running warmup test..." >> "${LOG_FILE}"
+    bash "${REPO_ROOT}/scripts/run/warmup.sh" mid.wav 10 >> "${LOG_FILE}" 2>&1 || echo "[deploy] $(date): Warmup failed" >> "${LOG_FILE}"
+  fi
+  
+  # Keep the background process alive to maintain server
+  wait "${SERVER_PID}"
+}
 
-if [[ ${RUN_WARMUP} -eq 1 ]]; then
-  echo "[deploy] Running warmup test..."
-  sleep 2  # Give server a moment to start
-  bash "${REPO_ROOT}/scripts/run/warmup.sh" mid.wav 10 || echo "[deploy] Warmup failed (server may still be starting)"
-fi
+# Run deployment in background
+nohup bash -c "$(declare -f deploy_background); deploy_background" &
+DEPLOY_PID=$!
+disown "${DEPLOY_PID}" || true
 
-echo "[deploy] Following logs (Ctrl-C to detach; server continues running)"
+echo "[deploy] Deployment process started (PID=${DEPLOY_PID})"
+echo "[deploy] Following logs (Ctrl-C stops following only, server continues):"
+echo ""
+
+# Follow logs with a brief delay to let background process start
+sleep 1
 tail -n +1 -F "${LOG_FILE}"
 
 

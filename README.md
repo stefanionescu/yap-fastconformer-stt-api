@@ -80,6 +80,9 @@ bash scripts/deploy.sh
 # Deploy + auto warmup test:
 bash scripts/deploy.sh --warmup
 
+# Follow logs (if you exited deploy):
+tail -f logs/asr_server.log
+
 # Manual warmup/test:
 bash scripts/run/warmup.sh mid.wav 10
 python tests/client.py --server 127.0.0.1:8000 --file samples/mid.wav --rtf 1.0 --print-partials
