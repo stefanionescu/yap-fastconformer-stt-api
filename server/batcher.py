@@ -67,6 +67,8 @@ class GlobalBatcher:
         # Maintain RNNT decoder streaming state across ticks, per slot
         # These are fed back into conformer_stream_step via previous_hypotheses
         self._prev_hypotheses: List[Optional[object]] = [None for _ in range(self.max_slots)]
+        # Maintain RNNT predictor (prediction network) state across ticks, per slot
+        self._prev_pred_out: List[Optional[object]] = [None for _ in range(self.max_slots)]
 
         self.results: asyncio.Queue[Tuple[str, str, int]] = asyncio.Queue(maxsize=8192)
 
@@ -86,6 +88,7 @@ class GlobalBatcher:
             self._streams[sid] = StreamState(sid, sr)
             # Reset streaming decoder state for this slot
             self._prev_hypotheses[slot] = None
+            self._prev_pred_out[slot] = None
 
     async def remove_stream(self, sid: str):
         async with self._lock:
@@ -94,6 +97,7 @@ class GlobalBatcher:
             if slot is not None:
                 # Clear any lingering streaming decoder state
                 self._prev_hypotheses[slot] = None
+                self._prev_pred_out[slot] = None
                 self._free_slots.append(slot)
                 self._free_slots.sort()
 
@@ -172,6 +176,8 @@ class GlobalBatcher:
 
             # Gather per-stream RNNT hypotheses state for active slots
             prev_hyp_batch: List[Optional[object]] = [self._prev_hypotheses[s] for s in slots]
+            # Gather per-stream RNNT predictor state for active slots
+            prev_pred_out_batch: List[Optional[object]] = [self._prev_pred_out[s] for s in slots]
 
             with torch.no_grad():
                 (
@@ -189,7 +195,7 @@ class GlobalBatcher:
                     cache_last_channel_len=cache_ch_len,
                     keep_all_outputs=True,
                     previous_hypotheses=prev_hyp_batch,
-                    previous_pred_out=None,
+                    previous_pred_out=prev_pred_out_batch,
                     drop_extra_pre_encoded=self.model.encoder.streaming_cfg.drop_extra_pre_encoded
                         if hasattr(self.model.encoder, "streaming_cfg") else 0,
                     return_transcription=True,
@@ -218,6 +224,19 @@ class GlobalBatcher:
             except Exception:
                 for slot in slots:
                     self._prev_hypotheses[slot] = None
+
+            # Persist updated RNNT predictor state back to their slots
+            try:
+                if isinstance(pred_out_stream, (list, tuple)):
+                    for i, slot in enumerate(slots):
+                        if i < len(pred_out_stream):
+                            self._prev_pred_out[slot] = pred_out_stream[i]
+                else:
+                    for slot in slots:
+                        self._prev_pred_out[slot] = pred_out_stream
+            except Exception:
+                for slot in slots:
+                    self._prev_pred_out[slot] = None
 
             now_ms = int(time.time() * 1000)
             texts = [h.text if hasattr(h, "text") else (str(h) if h is not None else "") for h in transcribed_texts]

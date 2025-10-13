@@ -95,6 +95,10 @@ async def main():
         decoder_type=DECODER,
         device=DEVICE,
     )
+    # Log effective inference configuration (note: NeMo may print train/val/test configs from the checkpoint; those do not affect inference)
+    print(
+        f"[server] Config: model={MODEL_NAME} device={DEVICE} step_ms={STEP_MS} max_slots={MAX_BATCH}"
+    )
     BATCHER = GlobalBatcher(
         model=model,
         step_ms=STEP_MS,
