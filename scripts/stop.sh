@@ -40,9 +40,12 @@ rm -rf "${HOME}/.cache/pip" || true
 echo "[stop] Clearing torch caches"
 rm -rf "${HOME}/.cache/torch" || true
 
+echo "[stop] Removing virtual environment and pip deps"
+rm -rf "${REPO_ROOT}/.venv" || true
+
 if [[ ${NUKE_VENV} -eq 1 ]]; then
-  echo "[stop] Removing virtual environment .venv/"
-  rm -rf "${REPO_ROOT}/.venv" || true
+  echo "[stop] Also clearing system pip cache"
+  python3 -m pip cache purge || true
 fi
 
 echo "[stop] Done"
