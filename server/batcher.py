@@ -223,7 +223,7 @@ class GlobalBatcher:
             # 2) Concat pre-encode cache on time dim
             act_slots_idx = torch.tensor(act_slots, dtype=torch.long, device=self.device)
             pre_cache_sel = self._pre_cache.index_select(0, act_slots_idx)
-            self._log_debug(
+            shape_msg = (
                 "stream step shapes audio=%s feats=%s pre_cache=%s feat_len=%s" % (
                     tuple(audio_act.shape),
                     tuple(feats_act.shape),
@@ -231,7 +231,12 @@ class GlobalBatcher:
                     feat_len_list,
                 )
             )
-            feats_cat = torch.cat([pre_cache_sel, feats_act], dim=-1)
+            self._log_debug(shape_msg)
+            try:
+                feats_cat = torch.cat([pre_cache_sel, feats_act], dim=-1)
+            except Exception as exc:
+                self._log_debug(f"torch.cat failure: {exc} | {shape_msg}", force=True)
+                raise
             proc_len_frames = feat_len_act + pre_cache_sel.size(-1)
 
             def _gather_rows(t: Optional[torch.Tensor], idx: List[int]) -> Optional[torch.Tensor]:
@@ -563,8 +568,8 @@ class GlobalBatcher:
             )
         return texts
 
-    def _log_debug(self, message: str) -> None:
-        if not self.verbose:
+    def _log_debug(self, message: str, *, force: bool = False) -> None:
+        if not (self.verbose or force):
             return
         if self._debug_count < self._debug_limit:
             print(f"[batcher] {message}")
