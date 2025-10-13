@@ -63,6 +63,8 @@ class GlobalBatcher:
         decoding_module = getattr(self.model, "decoding", None)
         self._tokenizer = getattr(self.model, "tokenizer", None)
         self._blank_id = getattr(decoding_module, "blank_id", None)
+        self._debug_limit = 64
+        self._debug_count = 0
 
         (self._cache_ch, self._cache_t, self._cache_ch_len) = \
             self.model.encoder.get_initial_cache_state(batch_size=self.max_slots)
@@ -257,6 +259,11 @@ class GlobalBatcher:
                 )
             self._global_step += 1
 
+            self._log_debug(
+                "stream step outputs="
+                f"{self._short_repr(transcribed_texts)}"
+            )
+
             def _scatter_rows(dst: Optional[torch.Tensor], src: Optional[torch.Tensor], idx: List[int]):
                 if dst is None or src is None:
                     return
@@ -371,6 +378,11 @@ class GlobalBatcher:
                     drop_extra_pre_encoded=int(self.model.encoder.streaming_cfg.drop_extra_pre_encoded),
                     return_transcription=True,
                 )
+
+            self._log_debug(
+                "flush outputs="
+                f"{self._short_repr(transcribed_texts)}"
+            )
 
             # Write back updated caches (harmless on final)
             if cache_ch_new is not None and self._cache_ch is not None:
@@ -493,6 +505,11 @@ class GlobalBatcher:
                 except Exception:
                     pass
 
+        self._log_debug(
+            "decode miss for type="
+            f"{type(hyp).__name__} tokens={self._short_repr(tokens)}"
+        )
+
         return ""
 
     def _decode_batch_texts(self, outputs, expected: int) -> List[str]:
@@ -520,4 +537,30 @@ class GlobalBatcher:
             items = list(items[0])
 
         texts = [self._decode_single_text(items[i]) if i < len(items) else "" for i in range(expected)]
+        if self.verbose and all(t == "" for t in texts):
+            self._log_debug(
+                "batch decode empty → raw="
+                f"{self._short_repr(outputs)}"
+            )
         return texts
+
+    def _log_debug(self, message: str) -> None:
+        if not self.verbose:
+            return
+        if self._debug_count < self._debug_limit:
+            print(f"[batcher] {message}")
+        elif self._debug_count == self._debug_limit:
+            print("[batcher] debug limit reached; suppressing further logs")
+        self._debug_count += 1
+
+    @staticmethod
+    def _short_repr(obj, limit: int = 256) -> str:
+        try:
+            text = repr(obj)
+        except Exception:
+            text = f"<repr_failed {type(obj).__name__}>"
+        if text is None:
+            return "None"
+        if len(text) > limit:
+            return text[:limit] + "..."
+        return text

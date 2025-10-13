@@ -16,6 +16,7 @@ from config import (
     DEFAULT_DEVICE,
     DEFAULT_STEP_MS,
     DEFAULT_MAX_BATCH,
+    DEFAULT_ASR_DEBUG
 )
 import os
 
@@ -34,6 +35,7 @@ DECODER = os.environ.get("ASR_DECODER", DEFAULT_DECODER)
 DEVICE = os.environ.get("ASR_DEVICE", DEFAULT_DEVICE)
 STEP_MS = int(os.environ.get("ASR_STEP_MS", str(DEFAULT_STEP_MS)))
 MAX_BATCH = int(os.environ.get("ASR_MAX_BATCH", str(DEFAULT_MAX_BATCH)))
+VERBOSE = os.environ.get("ASR_DEBUG", str(DEFAULT_ASR_DEBUG)).lower() in {"1", "true", "yes", "debug"}
 
 CLIENTS: Dict[str, websockets.WebSocketServerProtocol] = {}
 BATCHER: GlobalBatcher
@@ -102,7 +104,7 @@ async def main():
     )
     # Log effective inference configuration (note: NeMo may print train/val/test configs from the checkpoint; those do not affect inference)
     print(
-        f"[server] Config: model={MODEL_NAME} device={DEVICE} step_ms={STEP_MS} max_slots={MAX_BATCH}"
+        f"[server] Config: model={MODEL_NAME} device={DEVICE} step_ms={STEP_MS} max_slots={MAX_BATCH} verbose={VERBOSE}"
     )
     # Helpful one-time log of streaming configuration
     try:
@@ -121,6 +123,7 @@ async def main():
         sample_rate=16000,
         max_slots=MAX_BATCH,
         device=torch.device(DEVICE),
+        verbose=VERBOSE,
     )
     await BATCHER.start()
     asyncio.create_task(fanout_loop(BATCHER))
@@ -134,5 +137,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 

@@ -11,5 +11,4 @@ DEFAULT_DECODER: str = "rnnt"
 DEFAULT_DEVICE: str = "cuda:0"
 DEFAULT_STEP_MS: int = 80
 DEFAULT_MAX_BATCH: int = 64
-
-
+DEFAULT_ASR_DEBUG: str = "true"
