@@ -13,8 +13,18 @@ if [[ "${1:-}" == "--nuke-venv" ]]; then
   NUKE_VENV=1
 fi
 
-echo "[stop] Stopping ASR server processes (python asr_server.py)"
-# Try to stop running server(s)
+echo "[stop] Stopping ASR server"
+# Prefer pidfile if present
+PID_FILE="${REPO_ROOT}/.run/asr_server.pid"
+if [[ -f "${PID_FILE}" ]]; then
+  PID="$(cat "${PID_FILE}" || true)"
+  if [[ -n "${PID}" ]]; then
+    kill "${PID}" 2>/dev/null || true
+    sleep 1
+    rm -f "${PID_FILE}" || true
+  fi
+fi
+# Fallback: try to stop any remaining server(s)
 pkill -f "python .*server/asr_server.py" || true
 sleep 1
 

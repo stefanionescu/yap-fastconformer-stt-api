@@ -1,23 +1,12 @@
-# Yap FastConformer Streaming ASR (NeMo)
+# FastConformer Streaming ASR Server
 
-This is a production-ready, self-hosted streaming ASR server for the NVIDIA NeMo FastConformer Hybrid Large (cache-aware streaming) model:
+Production-ready streaming ASR server using NVIDIA NeMo FastConformer Hybrid Large with cache-aware streaming.
 
-- Model: `nvidia/stt_en_fastconformer_hybrid_large_streaming_multi` ([Hugging Face](https://huggingface.co/nvidia/stt_en_fastconformer_hybrid_large_streaming_multi))
-- True streaming with interim hypotheses (RNNT decoder)
-- Global batching across many concurrent WS clients (20 ms ticks)
-- Tuned for L40S / CUDA 12.x
-- Simple WebSocket protocol; VAD-agnostic (external turn-taking recommended)
-
-Important: NeMo cache-aware streaming currently runs the model in fp32. Mixed-precision/INT8 are not supported on this code path at the moment (see NeMo script notes). Scale via batching and horizontal replication.
-
-### Contents
-
-```
-./docker/      # Dockerfile + scripts
-./server/      # NeMo loader, batcher, WebSocket server
-./tests/       # Client, warmup, and bench utilities (WebSocket)
-./scripts/     # Non-Docker deployment scripts (venv + env.sh)
-```
+**Key Features:**
+- Real-time streaming transcription with interim results
+- Global batching for high concurrency (128+ streams)
+- WebSocket protocol, VAD-agnostic
+- Docker + script deployment options
 
 ### Quickstart (Docker)
 
@@ -75,55 +64,32 @@ docker run --rm -it --gpus all -p 8080:8080 \
   fastconf-streaming:latest
 ```
 
-## Non-Docker deployment (scripts)
-
-If you prefer running directly on a machine without Docker, use the scripts under `scripts/`.
-
-1) Create and activate a virtualenv, then install dependencies:
+## Script Deployment
 
 ```bash
-bash scripts/common/create_venv.sh
-bash scripts/common/install_deps.sh
-source .venv/bin/activate
-```
+# Deploy server (creates venv, installs deps, starts in background):
+bash scripts/deploy.sh
 
-2) Configure runtime using `scripts/common/env.sh` (edit as needed):
+# Deploy + auto warmup test:
+bash scripts/deploy.sh --warmup
 
-```bash
-$EDITOR scripts/env.sh
-```
+# Manual warmup/test:
+bash scripts/run/warmup.sh mid.wav 10
+python tests/client.py --server 127.0.0.1:8000 --file samples/mid.wav --rtf 1.0 --print-partials
+python tests/bench.py --server 127.0.0.1:8000 --file samples/mid.wav --rtf 1.0 --n 10 --concurrency 3
 
-3) Start the server:
-
-```bash
-bash scripts/run_server.sh
-# listens on ws://${ASR_HOST}:${ASR_PORT} (defaults 0.0.0.0:8000)
-```
-
-4) Warmup / test from the same machine:
-
-```bash
-bash scripts/warmup.sh mid.wav 1000
-python tests/client.py --server 127.0.0.1:8080 --file samples/mid.wav --rtf 1.0 --print-partials
-python tests/bench.py  --server 127.0.0.1:8080 --file samples/mid.wav --rtf 1.0 --n 10 --concurrency 3
-```
-
-Notes:
-- Single `requirements.txt` at repo root includes NeMo + test/runtime deps.
-- Docker build ignores `scripts/` and `.venv/` via `.dockerignore` (Docker path is independent).
-
-### Cleanup / stop
-
-To stop the local server and purge caches (HF, pip, torch):
-
-```bash
+# Stop server + cleanup:
 bash scripts/stop.sh
-# or, to also remove the virtualenv
-bash scripts/stop.sh --nuke-venv
 ```
 
-- NVIDIA model card: [Hugging Face](https://huggingface.co/nvidia/stt_en_fastconformer_hybrid_large_streaming_multi)
-- NeMo toolkit: `https://github.com/NVIDIA/NeMo`
+## Configuration
+
+Edit `scripts/deps/env.sh` or set environment variables:
+- `ASR_HOST` (default: 0.0.0.0)
+- `ASR_PORT` (default: 8000)  
+- `ASR_MAX_BATCH` (default: 128)
+- `ASR_ATT_CTX` (default: 70,1)
+- `ASR_DEVICE` (default: cuda:0)
 
 ### Performance tuning
 
