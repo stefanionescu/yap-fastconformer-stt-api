@@ -1,0 +1,9 @@
+nemo_toolkit[asr]==1.23.0
+pydantic==2.8.2
+uvicorn[standard]==0.30.5
+fastapi==0.114.0
+websockets==12.0
+soundfile==0.12.1
+numpy==1.26.4
+einops==0.8.0
+
