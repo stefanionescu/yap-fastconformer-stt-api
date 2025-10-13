@@ -8,6 +8,5 @@ source "$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )/../
 activate_venv
 
 echo "[server] Starting ASR server on ws://${ASR_HOST}:${ASR_PORT}"
-exec python "${REPO_ROOT}/server/asr_server.py"
-
+exec python -u "${REPO_ROOT}/server/asr_server.py"
 

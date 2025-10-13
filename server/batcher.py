@@ -246,6 +246,10 @@ class GlobalBatcher:
                 )
             )
             self._log_debug(shape_msg)
+            if feats_act.shape[1] != pre_cache_sel.shape[1]:
+                raise RuntimeError(
+                    f"Feature dim mismatch PRE={tuple(pre_cache_sel.shape)} FEAT={tuple(feats_act.shape)}"
+                )
             try:
                 feats_cat = torch.cat([pre_cache_sel, feats_act], dim=-1)
             except Exception as exc:
