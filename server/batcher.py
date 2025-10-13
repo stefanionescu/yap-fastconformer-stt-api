@@ -193,11 +193,12 @@ class GlobalBatcher:
                     cache_last_channel=cache_ch,
                     cache_last_time=cache_t,
                     cache_last_channel_len=cache_ch_len,
+                    # Keep all outputs when buffer is empty (single step) else allow model to drop preencoded tokens
                     keep_all_outputs=True,
                     previous_hypotheses=prev_hyp_batch,
                     previous_pred_out=prev_pred_out_batch,
-                    drop_extra_pre_encoded=self.model.encoder.streaming_cfg.drop_extra_pre_encoded
-                        if hasattr(self.model.encoder, "streaming_cfg") else 0,
+                    # Start simple: do not drop extra pre-encoded frames; can tune later
+                    drop_extra_pre_encoded=0,
                     return_transcription=True,
                 )
 
@@ -239,7 +240,16 @@ class GlobalBatcher:
                     self._prev_pred_out[slot] = None
 
             now_ms = int(time.time() * 1000)
-            texts = [h.text if hasattr(h, "text") else (str(h) if h is not None else "") for h in transcribed_texts]
+            # Robust extraction like NVIDIA example: hypotheses may be Hypothesis objects or plain strings
+            texts: List[str] = []
+            try:
+                for h in transcribed_texts:
+                    if hasattr(h, "text"):
+                        texts.append(str(getattr(h, "text", "") or ""))
+                    else:
+                        texts.append(str(h or ""))
+            except Exception:
+                texts = [""] * len(sids)
             for sid, txt in zip(sids, texts):
                 try:
                     self.results.put_nowait((sid, txt, now_ms))
