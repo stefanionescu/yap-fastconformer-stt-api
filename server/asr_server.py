@@ -99,6 +99,17 @@ async def main():
     print(
         f"[server] Config: model={MODEL_NAME} device={DEVICE} step_ms={STEP_MS} max_slots={MAX_BATCH}"
     )
+    # Helpful one-time log of streaming configuration
+    try:
+        scfg = model.encoder.streaming_cfg
+        print(
+            "[server] streaming_cfg: "
+            f"att_context={getattr(model.encoder, 'att_context_size', None)} "
+            f"pre_encode_cache={getattr(scfg, 'pre_encode_cache_size', None)} "
+            f"drop_extra_pre_encoded={getattr(scfg, 'drop_extra_pre_encoded', None)}"
+        )
+    except Exception:
+        pass
     BATCHER = GlobalBatcher(
         model=model,
         step_ms=STEP_MS,

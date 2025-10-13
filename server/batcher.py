@@ -64,6 +64,9 @@ class GlobalBatcher:
         (self._cache_ch, self._cache_t, self._cache_ch_len) = \
             self.model.encoder.get_initial_cache_state(batch_size=self.max_slots)
 
+        # Track global streaming steps to control pre-encoded frame dropping
+        self._global_step: int = 0
+
         # Maintain RNNT decoder streaming state across ticks, per slot
         # These are fed back into conformer_stream_step via previous_hypotheses
         self._prev_hypotheses: List[Optional[object]] = [None for _ in range(self.max_slots)]
@@ -179,7 +182,7 @@ class GlobalBatcher:
             # Gather per-stream RNNT predictor state for active slots
             prev_pred_out_batch: List[Optional[object]] = [self._prev_pred_out[s] for s in slots]
 
-            with torch.no_grad():
+            with torch.inference_mode():
                 (
                     pred_out_stream,
                     transcribed_texts,
@@ -193,14 +196,18 @@ class GlobalBatcher:
                     cache_last_channel=cache_ch,
                     cache_last_time=cache_t,
                     cache_last_channel_len=cache_ch_len,
-                    # Keep all outputs when buffer is empty (single step) else allow model to drop preencoded tokens
-                    keep_all_outputs=True,
+                    # Continuous stream: don't keep invalid tail outputs (only True on known final step)
+                    keep_all_outputs=False,
                     previous_hypotheses=prev_hyp_batch,
                     previous_pred_out=prev_pred_out_batch,
-                    # Start simple: do not drop extra pre-encoded frames; can tune later
-                    drop_extra_pre_encoded=0,
+                    # After the first tick, drop the extra pre-encoded frames per streaming_cfg
+                    drop_extra_pre_encoded=(
+                        0 if self._global_step == 0
+                        else int(self.model.encoder.streaming_cfg.drop_extra_pre_encoded)
+                    ),
                     return_transcription=True,
                 )
+            self._global_step += 1
 
             def _scatter_rows(dst: Optional[torch.Tensor], src: Optional[torch.Tensor], idx: List[int]):
                 if dst is None or src is None:
