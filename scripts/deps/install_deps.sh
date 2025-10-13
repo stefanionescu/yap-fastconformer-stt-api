@@ -23,5 +23,3 @@ pip install --no-build-isolation --no-cache-dir "youtokentome==1.0.6"
 # Install project requirements (youtokentome should already be satisfied)
 pip install -r "${REPO_ROOT}/requirements.txt"
 echo "[install] Dependencies installed."
-
-
