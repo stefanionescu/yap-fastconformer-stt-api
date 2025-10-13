@@ -12,8 +12,11 @@ fi
 source "${REPO_ROOT}/.venv/bin/activate"
 
 pip install --upgrade pip
-# Install Cython first (required for youtokentome build)
-pip install "Cython>=0.29.0"
+# Ensure build tooling is present for transitive deps
+pip install "Cython>=0.29.0" "numpy==1.26.4"
+# Preinstall youtokentome without build isolation so Cython is available
+pip install --no-build-isolation "youtokentome==1.0.6" || true
+# Install project requirements
 pip install -r "${REPO_ROOT}/requirements.txt"
 echo "[install] Dependencies installed."
 
