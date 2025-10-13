@@ -215,6 +215,20 @@ class GlobalBatcher:
                 feats_act, feat_len_act = self.model.preprocessor(
                     input_signal=audio_act, length=len_act_samples
                 )
+
+            # Normalise feature tensor layout to (B, n_mels, T)
+            expected_feat_dim = self._pre_cache.size(1)
+            if feats_act.ndim == 3:
+                if feats_act.size(1) != expected_feat_dim and feats_act.size(2) == expected_feat_dim:
+                    feats_act = feats_act.transpose(1, 2).contiguous()
+                elif feats_act.size(1) != expected_feat_dim and feats_act.size(-1) != expected_feat_dim:
+                    self._log_debug(
+                        f"unexpected feature dims {tuple(feats_act.shape)}, expected {expected_feat_dim}",
+                        force=True,
+                    )
+
+            if feat_len_act.ndim > 1:
+                feat_len_act = feat_len_act.view(-1)
             try:
                 feat_len_list = feat_len_act.detach().cpu().tolist()
             except Exception:
@@ -572,9 +586,9 @@ class GlobalBatcher:
         if not (self.verbose or force):
             return
         if self._debug_count < self._debug_limit:
-            print(f"[batcher] {message}")
+            print(f"[batcher] {message}", flush=True)
         elif self._debug_count == self._debug_limit:
-            print("[batcher] debug limit reached; suppressing further logs")
+            print("[batcher] debug limit reached; suppressing further logs", flush=True)
         self._debug_count += 1
 
     @staticmethod
