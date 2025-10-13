@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import time
+import traceback
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -165,7 +166,8 @@ class GlobalBatcher:
                 await self._step_once()
             except Exception as e:
                 if self.verbose:
-                    print(f"[batcher] step error: {e}")
+                    print(f"[batcher] step error: {e}", flush=True)
+                    print(traceback.format_exc(), flush=True)
             end = time.perf_counter()
             dt_ms = (end - start) * 1000.0
             self._ema_step_ms = dt_ms if self._ema_step_ms is None else (0.9 * self._ema_step_ms + 0.1 * dt_ms)
