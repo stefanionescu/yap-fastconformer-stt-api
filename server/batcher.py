@@ -63,8 +63,6 @@ class GlobalBatcher:
 
         (self._cache_ch, self._cache_t, self._cache_ch_len) = \
             self.model.encoder.get_initial_cache_state(batch_size=self.max_slots)
-        self._prev_hypotheses = None
-        self._prev_pred_out = None
 
         self.results: asyncio.Queue[Tuple[str, str, int]] = asyncio.Queue(maxsize=8192)
 
@@ -171,7 +169,7 @@ class GlobalBatcher:
                     cache_ch_new,
                     cache_t_new,
                     cache_ch_len_new,
-                    prev_hypotheses_new,
+                    _prev_hyp_unused,
                 ) = self.model.conformer_stream_step(
                     processed_signal=audio,
                     processed_signal_length=lengths,
@@ -179,15 +177,12 @@ class GlobalBatcher:
                     cache_last_time=cache_t,
                     cache_last_channel_len=cache_ch_len,
                     keep_all_outputs=True,
-                    previous_hypotheses=self._prev_hypotheses,
-                    previous_pred_out=self._prev_pred_out,
+                    previous_hypotheses=None,
+                    previous_pred_out=None,
                     drop_extra_pre_encoded=self.model.encoder.streaming_cfg.drop_extra_pre_encoded
                         if hasattr(self.model.encoder, "streaming_cfg") else 0,
                     return_transcription=True,
                 )
-
-            self._prev_hypotheses = prev_hypotheses_new
-            self._prev_pred_out = pred_out_stream
 
             def _scatter_rows(dst: Optional[torch.Tensor], src: Optional[torch.Tensor], idx: List[int]):
                 if dst is None or src is None:

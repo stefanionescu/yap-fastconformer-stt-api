@@ -92,7 +92,6 @@ tail -f logs/asr_server.log
 
 # Manual warmup/test:
 bash scripts/run/warmup.sh mid.wav 10
-python tests/client.py --server 127.0.0.1:8000 --file samples/mid.wav --rtf 1.0 --print-partials
 python tests/bench.py --server 127.0.0.1:8000 --file samples/mid.wav --rtf 1.0 --n 10 --concurrency 3
 
 # Stop server + cleanup:
