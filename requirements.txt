@@ -4,6 +4,6 @@ accelerate==0.34.2
 bitsandbytes==0.43.3
 numpy==1.26.4
 soundfile==0.12.1
-transformers==4.44.2
+transformers==4.46.1
 huggingface_hub==0.24.6
 hf_transfer
