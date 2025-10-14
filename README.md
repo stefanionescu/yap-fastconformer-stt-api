@@ -9,6 +9,12 @@ Moonshine-based real-time speech-to-text service with GPU batching, WebRTC data-
 - Clean scripts for local setup, warmup, benchmarking, and Docker builds
 - Tests exercising streaming, warmup, and benchmarking flows
 
+## Prerequisites
+- `pkg-config` (required to build PyAV for WebRTC transport)
+- `ffmpeg` (used by the sample tooling for audio resampling)
+
+Install them via your package manager, e.g. `brew install pkg-config ffmpeg` on macOS or `apt install pkg-config ffmpeg` on Debian/Ubuntu.
+
 ## Local Quickstart
 ```bash
 # 1) Create a virtual environment + install deps (CPU torch by default)
@@ -73,6 +79,7 @@ If an error occurs the server sends `{"op":"error","reason":"..."}` and closes t
 - `scripts/warmup.sh` — run warmup/latency probe against a server
 - `scripts/client.sh` — simple CLI client for manual testing
 - `scripts/bench.sh` — concurrency benchmark harness
+- `scripts/stop.sh` — stop the server, drop caches, and remove the local venv
 
 Each script honours `VENV_PATH` if you want to reuse a custom environment.
 

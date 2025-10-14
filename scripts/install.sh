@@ -7,6 +7,14 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 TORCH_VERSION="${TORCH_VERSION:-2.4.0}"
 TORCH_CUDA="${TORCH_CUDA:-}"
 
+if ! command -v pkg-config >/dev/null 2>&1; then
+  echo "pkg-config is required to build PyAV (dependency of aiortc). Please install it (e.g., 'brew install pkg-config' or 'apt install pkg-config')." >&2
+  exit 1
+fi
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "ffmpeg is recommended for audio preprocessing in tests. Install it via your package manager if missing." >&2
+fi
+
 if [[ ! -d "$VENV_PATH" ]]; then
   "${PYTHON_BIN}" -m venv "$VENV_PATH"
 fi
