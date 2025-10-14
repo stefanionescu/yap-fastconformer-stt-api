@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PATH="${VENV_PATH:-$ROOT_DIR/.venv}"
+PKG_LOG="$ROOT_DIR/.moonshine_installed_packages"
 
 if pgrep -f "server\.asr_server" >/dev/null 2>&1; then
   echo "Stopping running Moonshine ASR server processes..."
@@ -12,6 +13,30 @@ fi
 if [[ -d "$VENV_PATH" ]]; then
   echo "Removing virtual environment at $VENV_PATH"
   rm -rf "$VENV_PATH"
+fi
+
+if [[ -f "$PKG_LOG" ]]; then
+  echo "Removing system packages installed by install.sh"
+  if command -v apt-get >/dev/null 2>&1; then
+    while IFS= read -r pkg_line; do
+      [[ -z "$pkg_line" ]] && continue
+      apt-get remove -y --purge $pkg_line || true
+    done < "$PKG_LOG"
+    apt-get autoremove -y || true
+    apt-get clean || true
+  elif command -v yum >/dev/null 2>&1; then
+    while IFS= read -r pkg_line; do
+      [[ -z "$pkg_line" ]] && continue
+      yum remove -y $pkg_line || true
+    done < "$PKG_LOG"
+    yum clean all || true
+  elif command -v brew >/dev/null 2>&1; then
+    while IFS= read -r pkg_line; do
+      [[ -z "$pkg_line" ]] && continue
+      brew uninstall --ignore-dependencies $pkg_line || true
+    done < "$PKG_LOG"
+  fi
+  rm -f "$PKG_LOG"
 fi
 
 echo "Clearing Python __pycache__ directories"

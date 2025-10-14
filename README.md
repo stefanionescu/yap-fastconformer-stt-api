@@ -79,7 +79,7 @@ If an error occurs the server sends `{"op":"error","reason":"..."}` and closes t
 - `scripts/warmup.sh` — run warmup/latency probe against a server
 - `scripts/client.sh` — simple CLI client for manual testing
 - `scripts/bench.sh` — concurrency benchmark harness
-- `scripts/stop.sh` — stop the server, drop caches, and remove the local venv
+- `scripts/stop.sh` — stop the server, drop caches, remove the local venv, and uninstall any system packages `scripts/install.sh` added
 
 Each script honours `VENV_PATH` if you want to reuse a custom environment.
 

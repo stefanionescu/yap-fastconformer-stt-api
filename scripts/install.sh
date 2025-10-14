@@ -8,6 +8,7 @@ TORCH_VERSION="${TORCH_VERSION:-2.4.0}"
 TORCH_CUDA="${TORCH_CUDA:-}"
 
 APT_UPDATED=0
+PKG_LOG="$ROOT_DIR/.moonshine_installed_packages"
 
 ensure_system_dep() {
   local dep="$1"
@@ -24,6 +25,8 @@ ensure_system_dep() {
       APT_UPDATED=1
     fi
     apt-get install -y $install_hint
+    mkdir -p "$(dirname "$PKG_LOG")"
+    printf '%s\n' "$install_hint" >> "$PKG_LOG"
   elif command -v yum >/dev/null 2>&1; then
     yum install -y $install_hint
   elif command -v brew >/dev/null 2>&1; then
