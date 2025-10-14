@@ -404,7 +404,7 @@ class GlobalBatcher:
                 for i in idxs:
                     self._slot_step[slots[i]] += 1
 
-                # Fanout running transcript text (replace on change)
+                # Fanout running transcript text (prefix-merge: prefer monotonic growth)
                 now_ms = int(time.time() * 1000)
                 texts = self._decode_batch_texts(transcribed_texts, len(idxs))
                 for k, i in enumerate(idxs):
@@ -417,11 +417,16 @@ class GlobalBatcher:
                         continue
 
                     current = self._running_text[slot]
-                    if txt != current:
-                        self._running_text[slot] = txt
-                        self._last_text[slot] = txt
+                    if len(txt) >= len(current) and txt.startswith(current):
+                        merged = txt
+                    else:
+                        merged = (current + (" " if current and not current.endswith(" ") else "") + txt).strip()
+
+                    if merged != current:
+                        self._running_text[slot] = merged
+                        self._last_text[slot] = merged
                         try:
-                            self.results.put_nowait((sid, txt, now_ms))
+                            self.results.put_nowait((sid, merged, now_ms))
                         except asyncio.QueueFull:
                             pass
 
