@@ -156,6 +156,7 @@ async def run_streaming_session(
     secure: bool = False,
     print_partials: bool = False,
     offer_path: str = "/webrtc",
+    headers: dict[str, str] | None = None,
 ) -> Dict[str, object]:
     if sr != 16000:
         raise ValueError("Moonshine server expects 16 kHz audio")
@@ -219,7 +220,11 @@ async def run_streaming_session(
     await pc.setLocalDescription(offer)
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json={"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}) as resp:
+        async with session.post(
+            url,
+            json={"sdp": pc.localDescription.sdp, "type": pc.localDescription.type},
+            headers=headers,
+        ) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"Offer failed with status {resp.status}")
             answer = await resp.json()

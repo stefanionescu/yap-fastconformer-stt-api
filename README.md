@@ -84,9 +84,39 @@ If an error occurs the server sends `{"op":"error","reason":"..."}` and closes t
 Each script honours `VENV_PATH` if you want to reuse a custom environment.
 
 ## Tests & Benchmarks
-- `tests/warmup.py` — single streaming session health check
-- `tests/client.py` — manual client for experimentation
-- `tests/bench.py` — runs multiple concurrent sessions and summarizes latency stats
+- `scripts/test/warmup.sh` — single streaming session health check (local GPU)
+- `scripts/test/client.sh` — simple CLI client for quick manual trials (local GPU)
+- `scripts/test/bench.sh` — concurrency benchmark harness (local GPU)
+- `tests/client.py` — advanced client for local or RunPod endpoints
+
+Example usage (assumes the server is running):
+```bash
+# Local GPU smoke test
+bash scripts/test/warmup.sh --file samples/mid.wav --rtf 10 --full-text
+
+# Local GPU benchmark
+bash scripts/test/bench.sh --file samples/mid.wav --rtf 1.0 --n 20 --concurrency 4
+
+# Remote RunPod call using profile defaults
+python tests/client.py --print-partials
+
+# Override with explicit HTTPS endpoint
+python tests/client.py --https-url https://your-runpod-endpoint/webrtc --api-key "$RUNPOD_API_KEY" --file samples/mid.wav
+```
+
+### RunPod environment file
+Create a simple `.env` file alongside the repo (or point `--env-file` elsewhere):
+```
+# .env (default path: repo_root/.env)
+RUNPOD_API_KEY=your_runpod_api_key
+RUNPOD_HTTPS_URL=https://your-endpoint.example.com/webrtc
+# Or specify raw TCP instead:
+# RUNPOD_TCP_HOST=1.2.3.4
+# RUNPOD_TCP_PORT=8000
+# Optional custom path
+# RUNPOD_WEBRTC_PATH=/custom/path
+```
+Values in `.env` are automatically loaded but can be overridden via CLI flags or environment variables (`RUNPOD_API_KEY`, `RUNPOD_HTTPS_URL`, etc.).
 
 All scripts/tests stream 16 kHz PCM16 mono audio from files under `samples/` by default.
 
