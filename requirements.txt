@@ -5,5 +5,5 @@ bitsandbytes==0.43.3
 numpy==1.26.4
 soundfile==0.12.1
 transformers==4.57.1
-huggingface_hub==0.24.6
+huggingface_hub==0.34.0
 hf_transfer
