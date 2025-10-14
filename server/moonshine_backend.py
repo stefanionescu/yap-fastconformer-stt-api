@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from inspect import signature
 from typing import Sequence
 
 import numpy as np
@@ -32,13 +33,7 @@ class MoonshineBackend:
                 "useful-moonshine-onnx (v1.0.0) must be installed to run the ONNX backend"
             )
 
-        init_kwargs: dict[str, object] = {}
-        if cfg.onnx_engine_dir:
-            init_kwargs["engine_dir"] = cfg.onnx_engine_dir
-        if cfg.onnx_providers:
-            init_kwargs["providers"] = list(cfg.onnx_providers)
-        if cfg.onnx_provider_options:
-            init_kwargs["provider_options"] = cfg.onnx_provider_options
+        init_kwargs = self._build_constructor_kwargs(cfg)
 
         _LOG.info(
             "Initialising Moonshine ONNX model %s (providers=%s)",
@@ -47,6 +42,7 @@ class MoonshineBackend:
         )
         self._model = MoonshineOnnxModel(model_name=cfg.model_name, **init_kwargs)
         self._tokenizer = load_tokenizer()
+        self._apply_provider_preferences(cfg)
         self._min_samples = self._resolve_min_samples(cfg.sample_rate)
         self._info = ModelInfo(
             model_name=cfg.model_name,
@@ -120,6 +116,44 @@ class MoonshineBackend:
                     return 4096
                 continue
         return 4096
+
+    def _build_constructor_kwargs(self, cfg: Config) -> dict[str, object]:
+        supported = set(signature(MoonshineOnnxModel.__init__).parameters)
+        kwargs: dict[str, object] = {}
+        if "engine_dir" in supported and cfg.onnx_engine_dir:
+            kwargs["engine_dir"] = cfg.onnx_engine_dir
+        return kwargs
+
+    def _build_provider_option_list(
+        self,
+        providers: Sequence[str] | None,
+        options_map: dict[str, dict[str, str]] | None,
+    ) -> list[dict[str, str]]:
+        if not providers:
+            return []
+        if not options_map:
+            return [{} for _ in providers]
+        return [options_map.get(p, {}) for p in providers]
+
+    def _apply_provider_preferences(self, cfg: Config) -> None:
+        providers = list(cfg.onnx_providers)
+        if not providers:
+            return
+        session = (
+            getattr(self._model, "session", None)
+            or getattr(self._model, "_session", None)
+            or getattr(self._model, "_inference_session", None)
+        )
+        if session is None or not hasattr(session, "set_providers"):
+            return
+        provider_options = self._build_provider_option_list(providers, cfg.onnx_provider_options)
+        try:
+            if provider_options:
+                session.set_providers(providers, provider_options)
+            else:
+                session.set_providers(providers)
+        except Exception as exc:  # pragma: no cover - best effort
+            _LOG.warning("Failed to set ONNX providers %s: %s", providers, exc)
 
 
 __all__ = ["MoonshineBackend", "ModelInfo"]
