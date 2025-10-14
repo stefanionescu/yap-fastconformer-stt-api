@@ -15,10 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 RUN python -m pip install --upgrade pip wheel
 
-RUN python -m pip install --no-cache-dir \
-    --extra-index-url https://download.pytorch.org/whl/cu121 \
-    torch==2.4.0+cu121
-
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
@@ -33,8 +29,8 @@ RUN chmod +x /entrypoint.sh
 ENV ASR_HOST=0.0.0.0 \
     ASR_PORT=8000 \
     ASR_WEBRTC_PATH=/webrtc \
-    MOONSHINE_MODEL_ID=UsefulSensors/moonshine-base \
-    MOONSHINE_PRECISION=fp16
+    MOONSHINE_MODEL=moonshine/base \
+    MOONSHINE_ONNX_PROVIDERS=TensorrtExecutionProvider,CUDAExecutionProvider,CPUExecutionProvider
 
 EXPOSE 8000
 ENTRYPOINT ["/entrypoint.sh"]

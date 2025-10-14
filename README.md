@@ -5,7 +5,7 @@ Moonshine-based real-time speech-to-text service with GPU batching, WebRTC data-
 ## Highlights
 - Real-time streaming transcription over WebRTC data channels (binary PCM16 @ 16 kHz)
 - Global batching with configurable batch size and wait time (default max batch 32)
-- Moonshine Transformer backend with fp16, bf16, fp32, or int8 execution modes
+- Moonshine ONNX/TensorRT backend (useful-moonshine-onnx v1.0.0) tuned for low-latency inference on NVIDIA GPUs
 - Clean scripts for local setup, warmup, benchmarking, and Docker builds
 - Tests exercising streaming, warmup, and benchmarking flows
 
@@ -27,13 +27,6 @@ tail -f logs/moonshine.log
 Check the last 200 log lines without following:
 ```bash
 tail -n 200 logs/moonshine.log
-```
-
-### Manual control / GPU overrides
-If you need to customise the install step (e.g., selecting a different CUDA wheel), run:
-```bash
-TORCH_CUDA=cu121 TORCH_VERSION=2.4.0 bash scripts/core/install.sh
-bash scripts/core/start.sh
 ```
 
 Utility runners for tests live under `scripts/test/` (see below), or you can use `scripts/stop.sh` to tear everything down.
@@ -68,12 +61,35 @@ If an error occurs the server sends `{"op":"error","reason":"..."}` and closes t
 - `ASR_HOST` (default `0.0.0.0`)
 - `ASR_PORT` (default `8000`)
 - `ASR_WEBRTC_PATH` (default `/webrtc`)
-- `MOONSHINE_MODEL_ID` (default `UsefulSensors/moonshine-base`)
-- `MOONSHINE_PRECISION` (`fp16`, `bf16`, `fp32`, `int8`; default `fp16`)
+- `MOONSHINE_MODEL` (Moonshine ONNX alias, default `moonshine/base`)
+- `MOONSHINE_ONNX_PROVIDERS` (comma-separated ONNX Runtime EP list, e.g. `TensorrtExecutionProvider,CUDAExecutionProvider,CPUExecutionProvider`)
+- `MOONSHINE_TRT_ENGINE_DIR` (optional path containing pre-built TensorRT engines)
+- `MOONSHINE_ONNX_PROVIDER_OPTIONS` (advanced key/value overrides per provider)
 - `MAX_BATCH_SIZE` (default `32`)
 - `MAX_BATCH_WAIT_MS` (default `10`)
 - `MAX_BUFFER_SECONDS` (default `90`)
 - `MODEL_WARMUP_SECONDS` (default `1.5`)
+- `MIN_SAMPLES` (optional minimum waveform length override)
+
+### ONNX / TensorRT runtime
+
+The server always runs through the [useful-moonshine-onnx](https://github.com/moonshine-ai/moonshine/tree/main/moonshine-onnx) stack (v1.0.0). Installation is handled automatically by `scripts/core/install.sh`, but if you need to install manually:
+
+```bash
+# Example install (GPU build with TensorRT + CUDA execution providers).
+pip install onnxruntime-gpu==1.18.1
+pip install "useful-moonshine-onnx@git+https://github.com/moonshine-ai/moonshine.git#subdirectory=moonshine-onnx"
+```
+
+`onnxruntime-gpu` bundles CUDA and TensorRT execution providers. Ensure the version you pin matches the driver/toolkit stack on your deployment hosts.
+
+Key knobs:
+- `MOONSHINE_MODEL` — alias used by `MoonshineOnnxModel` (e.g. `moonshine/base`, `moonshine/tiny`).
+- `MOONSHINE_ONNX_PROVIDERS` — preferred execution providers, e.g. `TensorrtExecutionProvider,CUDAExecutionProvider,CPUExecutionProvider`.
+- `MOONSHINE_TRT_ENGINE_DIR` — directory holding TensorRT engine binaries if you have pre-built artifacts.
+- `MOONSHINE_ONNX_PROVIDER_OPTIONS` — comma separated `PROVIDER=key:value;key2:value2` overrides passed to ONNX Runtime.
+
+When TensorRT is first selected the ONNX runtime may need to build an engine; cache directories can be pointed at via `MOONSHINE_TRT_ENGINE_DIR` to avoid warm starts. The batching layer, VAD workflow, and WebRTC contract remain unchanged across provider mixes.
 
 ## Scripts
 - `scripts/run_all.sh` — fire-and-forget install→launch pipeline with live log tail
@@ -126,8 +142,8 @@ Values in `.env` are automatically loaded but can be overridden via CLI flags or
 All scripts/tests stream 16 kHz PCM16 mono audio from files under `` by default.
 
 ## Docker Assets
-- `docker/Dockerfile` — CUDA 12.1 runtime base with torch 2.4.0+cu121
+- `docker/Dockerfile` — CUDA 12.1 runtime base preconfigured for ONNX Runtime GPU execution
 - `docker/build.sh` — helper to build `moonshine-asr` image
 - `docker/run.sh` — helper to run the container with GPU access
 
-Override `MOONSHINE_MODEL_ID`, `MOONSHINE_PRECISION`, or `MAX_BATCH_SIZE` via `docker run -e ...`.
+Override `MOONSHINE_MODEL`, `MOONSHINE_ONNX_PROVIDERS`, or `MAX_BATCH_SIZE` via `docker run -e ...`.

@@ -75,20 +75,15 @@ done
 
 # --- Clear user-level caches related to this project ---
 CACHE_PATHS=(
-  "$HOME/.cache/huggingface"
-  "$HOME/.cache/hf_transfer"
-  "$HOME/.cache/torch"
+  "$HOME/.cache/onnxruntime"
   "$HOME/.cache/pip"
   "$HOME/.cache/aiohttp"
   "$HOME/.cache/aioice"
   "$HOME/.cache/aiortc"
   "$HOME/.cache/pyav"
-  "$HOME/.cache/transformers"
   "$HOME/.local/share/aiortc"
   "$HOME/.local/state/aiortc"
   "$HOME/.config/aiortc"
-  "$HOME/.local/share/huggingface"
-  "$HOME/.config/huggingface"
 )
 for cache_dir in "${CACHE_PATHS[@]}"; do
   if [[ -e "$cache_dir" ]]; then

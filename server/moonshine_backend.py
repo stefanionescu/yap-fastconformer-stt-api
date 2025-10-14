@@ -1,174 +1,95 @@
 from __future__ import annotations
 
-import contextlib
 import logging
-from dataclasses import dataclass
-from typing import Iterable, Sequence
 import os
+from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
-import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
-
-try:  # Optional dependency for int8 loading
-    from transformers import BitsAndBytesConfig  # type: ignore
-except ImportError:  # pragma: no cover - optional
-    BitsAndBytesConfig = None  # type: ignore[misc,assignment]
-
-try:
-    from transformers import MoonshineForConditionalGeneration as _MoonshineModel
-except ImportError:  # pragma: no cover - older transformers
-    _MoonshineModel = None
 
 from .config import Config
 
 _LOG = logging.getLogger(__name__)
 
+try:  # Optional dependency installed via requirements
+    from moonshine_onnx import MoonshineOnnxModel, load_tokenizer  # type: ignore
+except ImportError:  # pragma: no cover - enforced during startup
+    MoonshineOnnxModel = None  # type: ignore
+    load_tokenizer = None  # type: ignore
+
 
 @dataclass(frozen=True)
 class ModelInfo:
-    model_id: str
-    device: torch.device
-    precision: str
-    autocast_dtype: torch.dtype | None
+    model_name: str
+    providers: tuple[str, ...]
+    engine_dir: str | None
 
 
 class MoonshineBackend:
     def __init__(self, cfg: Config) -> None:
-        device = self._resolve_device(cfg)
-        precision = cfg.precision
-        self._autocast_dtype = self._resolve_autocast_dtype(cfg)
+        if MoonshineOnnxModel is None or load_tokenizer is None:
+            raise RuntimeError(
+                "useful-moonshine-onnx (v1.0.0) must be installed to run the ONNX backend"
+            )
+
+        init_kwargs: dict[str, object] = {}
+        if cfg.onnx_engine_dir:
+            init_kwargs["engine_dir"] = cfg.onnx_engine_dir
+        if cfg.onnx_providers:
+            init_kwargs["providers"] = list(cfg.onnx_providers)
+        if cfg.onnx_provider_options:
+            init_kwargs["provider_options"] = cfg.onnx_provider_options
+
+        _LOG.info(
+            "Initialising Moonshine ONNX model %s (providers=%s)",
+            cfg.model_name,
+            ",".join(cfg.onnx_providers) if cfg.onnx_providers else "default",
+        )
+        self._model = MoonshineOnnxModel(model_name=cfg.model_name, **init_kwargs)
+        self._tokenizer = load_tokenizer()
+        self._min_samples = self._resolve_min_samples(cfg.sample_rate)
         self._info = ModelInfo(
-            model_id=cfg.model_id,
-            device=device,
-            precision=precision,
-            autocast_dtype=self._autocast_dtype,
+            model_name=cfg.model_name,
+            providers=tuple(cfg.onnx_providers),
+            engine_dir=cfg.onnx_engine_dir,
         )
-        # Determine a safe minimum so Moonshine’s conv stack never sees too-short inputs.
-        # Priority: env override -> on-the-fly calibration -> sane default.
-        env_min = int(os.environ.get("MIN_SAMPLES", "0") or "0")
-        self._min_samples = env_min if env_min > 0 else 0
-        self._processor = AutoProcessor.from_pretrained(
-            cfg.model_id,
-            trust_remote_code=True,
-        )
-        self._model = self._load_model(cfg, device)
-        self._model.eval()
-        self._target_dtype = self._detect_parameter_dtype()
-        if self._min_samples <= 0:
-            self._min_samples = self._calibrate_min_samples(cfg.sample_rate)
-        # Ensure warmup uses at least the safe minimum
         warmup_n = (
             max(int(cfg.warmup_seconds * cfg.sample_rate), self._min_samples)
             if cfg.warmup_seconds > 0
             else self._min_samples
         )
+        self._warmup(warmup_n)
         _LOG.info(
-            "Loaded Moonshine model %s on %s (%s); calibrated min_samples=%d (%.1f ms)",
-            cfg.model_id,
-            device,
-            precision,
+            "Moonshine ONNX ready; min_samples=%d (%.1f ms @16kHz)",
             self._min_samples,
             1000.0 * self._min_samples / 16000.0,
         )
-        self._warmup(warmup_n)
 
     @property
     def info(self) -> ModelInfo:
         return self._info
 
-    def _resolve_device(self, cfg: Config) -> torch.device:
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        if torch.backends.mps.is_available():  # pragma: no cover - mac fallback
-            return torch.device("mps")
-        if not cfg.allow_cpu_fallback:
-            raise RuntimeError("No GPU found and CPU fallback disabled")
-        return torch.device("cpu")
-
-    def _resolve_autocast_dtype(self, cfg: Config) -> torch.dtype | None:
-        if cfg.precision == "fp16":
-            return torch.float16
-        if cfg.precision == "bf16":
-            return torch.bfloat16
-        return None
-
-    def _detect_parameter_dtype(self) -> torch.dtype | None:
-        try:
-            return next(self._model.parameters()).dtype
-        except StopIteration:  # pragma: no cover - unlikely
-            return None
-
-    def _load_model(self, cfg: Config, device: torch.device) -> torch.nn.Module:
-        precision = cfg.precision
-        kwargs = {"trust_remote_code": True}
-        quant_config = None
-        if precision == "int8":
-            if BitsAndBytesConfig is None:
-                raise RuntimeError(
-                    "bitsandbytes is required for int8 loading but is not available"
-                )
-            quant_config = BitsAndBytesConfig(load_in_8bit=True)
-            kwargs.update(
-                {
-                    "device_map": "auto",
-                    "quantization_config": quant_config,
-                }
-            )
-        else:
-            dtype = {
-                "fp16": torch.float16,
-                "bf16": torch.bfloat16,
-                "fp32": torch.float32,
-            }.get(precision, torch.float16)
-            kwargs.update({"dtype": dtype})
-        model_cls = _MoonshineModel or AutoModelForSpeechSeq2Seq
-        model = model_cls.from_pretrained(cfg.model_id, **kwargs)
-        if precision != "int8":
-            model.to(device)
-        return model
-
-    def _warmup(self, samples: int) -> None:
-        samples = max(samples, 1)
-        audio = np.zeros((1, samples), dtype=np.float32)
-        with torch.no_grad():
-            inputs = self._processor(audio, sampling_rate=16000, return_tensors="pt", padding=True)
-            inputs = self._to_device_dtype(inputs)
-            with self._autocast_context():
-                tokens = self._model.generate(**inputs, max_new_tokens=1)
-            _ = self._processor.batch_decode(tokens, skip_special_tokens=True)
-        _LOG.info("Warmup complete (%d samples)", samples)
-
-    def _calibrate_min_samples(self, sr: int) -> int:
-        """
-        Find the smallest waveform length (in samples) that Moonshine accepts without
-        the conv1d 'kernel > input length' runtime error. Try a quick ladder, then fall back.
-        """
-        candidates = [512, 1024, 1536, 2048, 3072, 4096, 6144, 8192]
-        for n in candidates:
-            try:
-                with torch.no_grad():
-                    audio = np.zeros((1, n), dtype=np.float32)
-                    inputs = self._processor(audio, sampling_rate=sr, return_tensors="pt", padding=True)
-                    inputs = self._to_device_dtype(inputs)
-                    with self._autocast_context():
-                        _ = self._model.generate(**inputs, max_new_tokens=1)
-                return n
-            except Exception as exc:
-                if "Kernel size" not in str(exc):
-                    # Unexpected error → stop early and use a safe default
-                    _LOG.warning("Calibration stopped early at %d samples: %s", n, exc)
-                    return 4096
-                continue
-        return 4096
-
     @property
     def min_samples(self) -> int:
         return self._min_samples
 
+    def transcribe(self, audios: Sequence[np.ndarray]) -> list[str]:
+        if not audios:
+            return []
+        batch = self._prepare_batch(audios)
+        stacked = np.stack(batch, axis=0).astype(np.float32)
+        tokens = self._model.generate(stacked)
+        texts = self._tokenizer.decode_batch(tokens)
+        return [t.strip() for t in texts]
+
+    def _warmup(self, samples: int) -> None:
+        samples = max(samples, 1)
+        audio = np.zeros((1, samples), dtype=np.float32)
+        self._model.generate(audio)
+
     def _prepare_batch(self, audios: Sequence[np.ndarray]) -> list[np.ndarray]:
         cleaned: list[np.ndarray] = []
-        for idx, audio in enumerate(audios):
+        for audio in audios:
             if audio.size == 0:
                 cleaned.append(np.zeros(self._min_samples, dtype=np.float32))
                 continue
@@ -180,34 +101,25 @@ class MoonshineBackend:
             cleaned.append(arr)
         return cleaned
 
-    def transcribe(self, audios: Sequence[np.ndarray]) -> list[str]:
-        if not audios:
-            return []
-        batch = self._prepare_batch(audios)
-        with torch.no_grad():
-            inputs = self._processor(batch, sampling_rate=16000, return_tensors="pt", padding=True)
-            inputs = self._to_device_dtype(inputs)
-            with self._autocast_context():
-                tokens = self._model.generate(**inputs)
-            texts = self._processor.batch_decode(tokens, skip_special_tokens=True)
-        return [t.strip() for t in texts]
+    def _resolve_min_samples(self, sample_rate: int) -> int:
+        env_min = int(os.environ.get("MIN_SAMPLES", "0") or "0")
+        if env_min > 0:
+            return env_min
+        return self._calibrate_min_samples(sample_rate)
 
-    def _to_device_dtype(self, tensors: dict[str, object]) -> dict[str, object]:
-        for key, value in list(tensors.items()):
-            if not isinstance(value, torch.Tensor):
+    def _calibrate_min_samples(self, _: int) -> int:
+        candidates = [512, 1024, 1536, 2048, 3072, 4096, 6144, 8192]
+        for n in candidates:
+            try:
+                audio = np.zeros((1, n), dtype=np.float32)
+                _ = self._model.generate(audio)
+                return n
+            except Exception as exc:  # pragma: no cover - runtime dependent
+                if "Kernel size" not in str(exc):
+                    _LOG.warning("Calibration stopped at %d samples: %s", n, exc)
+                    return 4096
                 continue
-            value = value.to(self._info.device)
-            if self._info.precision != "int8" and self._target_dtype is not None:
-                value = value.to(self._target_dtype)
-            tensors[key] = value
-        return tensors
-
-    def _autocast_context(self):
-        autocast_dtype = self._info.autocast_dtype
-        enabled = autocast_dtype is not None and self._info.device.type in {"cuda", "mps"}
-        if enabled:
-            return torch.autocast(self._info.device.type, dtype=autocast_dtype)
-        return contextlib.nullcontext()
+        return 4096
 
 
 __all__ = ["MoonshineBackend", "ModelInfo"]

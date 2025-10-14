@@ -1,9 +1,6 @@
 aiohttp==3.10.5
 aiortc==1.6.0
-accelerate==0.34.2
-bitsandbytes==0.43.3
 numpy==1.26.4
 soundfile==0.12.1
-transformers==4.57.1
-huggingface_hub==0.34.0
-hf_transfer
+onnxruntime-gpu==1.18.1
+useful-moonshine-onnx @ git+https://github.com/moonshine-ai/moonshine.git#subdirectory=moonshine-onnx
