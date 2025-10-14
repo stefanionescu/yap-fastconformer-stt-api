@@ -26,11 +26,27 @@ ensure_system_dep() {
     fi
     apt-get install -y $install_hint
     mkdir -p "$(dirname "$PKG_LOG")"
-    printf '%s\n' "$install_hint" >> "$PKG_LOG"
+    for pkg in $install_hint; do
+      if ! grep -qx "$pkg" "$PKG_LOG" 2>/dev/null; then
+        printf '%s\n' "$pkg" >> "$PKG_LOG"
+      fi
+    done
   elif command -v yum >/dev/null 2>&1; then
     yum install -y $install_hint
+    mkdir -p "$(dirname "$PKG_LOG")"
+    for pkg in $install_hint; do
+      if ! grep -qx "$pkg" "$PKG_LOG" 2>/dev/null; then
+        printf '%s\n' "$pkg" >> "$PKG_LOG"
+      fi
+    done
   elif command -v brew >/dev/null 2>&1; then
     brew install $install_hint
+    mkdir -p "$(dirname "$PKG_LOG")"
+    for pkg in $install_hint; do
+      if ! grep -qx "$pkg" "$PKG_LOG" 2>/dev/null; then
+        printf '%s\n' "$pkg" >> "$PKG_LOG"
+      fi
+    done
   else
     echo "Could not auto-install '$dep'. Please install it manually (hint: $install_hint)." >&2
     exit 1

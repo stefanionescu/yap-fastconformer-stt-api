@@ -18,18 +18,18 @@ fi
 if [[ -f "$PKG_LOG" ]]; then
   echo "Removing system packages installed by install.sh"
   if command -v apt-get >/dev/null 2>&1; then
-    while IFS= read -r pkg_line; do
-      [[ -z "$pkg_line" ]] && continue
-      apt-get remove -y --purge $pkg_line || true
-    done < "$PKG_LOG"
-    apt-get autoremove -y || true
-    apt-get clean || true
+    mapfile -t pkgs < "$PKG_LOG"
+    if [[ ${#pkgs[@]} -gt 0 ]]; then
+      apt-get remove -y --purge "${pkgs[@]}" || true
+      apt-get autoremove -y || true
+      apt-get clean || true
+    fi
   elif command -v yum >/dev/null 2>&1; then
-    while IFS= read -r pkg_line; do
-      [[ -z "$pkg_line" ]] && continue
-      yum remove -y $pkg_line || true
-    done < "$PKG_LOG"
-    yum clean all || true
+    mapfile -t pkgs < "$PKG_LOG"
+    if [[ ${#pkgs[@]} -gt 0 ]]; then
+      yum remove -y "${pkgs[@]}" || true
+      yum clean all || true
+    fi
   elif command -v brew >/dev/null 2>&1; then
     while IFS= read -r pkg_line; do
       [[ -z "$pkg_line" ]] && continue
