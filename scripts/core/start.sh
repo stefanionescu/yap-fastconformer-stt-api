@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VENV_PATH="${VENV_PATH:-$ROOT_DIR/.venv}"
 HOST="${ASR_HOST:-0.0.0.0}"
 PORT="${ASR_PORT:-8000}"
