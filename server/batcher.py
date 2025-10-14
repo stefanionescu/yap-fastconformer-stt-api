@@ -318,7 +318,6 @@ class GlobalBatcher:
                     )
                 )
 
-                prev_h = [self._prev_hypotheses[slots[i]] for i in idxs]
                 prev_p = [self._prev_pred_out[slots[i]] for i in idxs]
 
                 with torch.inference_mode():
@@ -336,7 +335,7 @@ class GlobalBatcher:
                         cache_last_time=cache_t,
                         cache_last_channel_len=cache_ch_len,
                         keep_all_outputs=False,
-                        previous_hypotheses=prev_h,
+                        previous_hypotheses=None,
                         previous_pred_out=prev_p,
                         drop_extra_pre_encoded=int(drop),
                         return_transcription=True,
@@ -367,18 +366,7 @@ class GlobalBatcher:
                         tail = torch.cat([pad, feats_cat], dim=-1)
                     self._pre_cache.index_copy_(0, idx_t, tail)
 
-                # Persist RNNT states
-                try:
-                    if isinstance(new_prev_hypotheses, (list, tuple)):
-                        for j, i in enumerate(idxs):
-                            self._prev_hypotheses[slots[i]] = new_prev_hypotheses[j] if j < len(new_prev_hypotheses) else None
-                    else:
-                        for i in idxs:
-                            self._prev_hypotheses[slots[i]] = None
-                except Exception:
-                    for i in idxs:
-                        self._prev_hypotheses[slots[i]] = None
-
+                # Persist RNNT predictor state only (no previous_hypotheses for frame-loop greedy)
                 try:
                     if isinstance(pred_out_stream, (list, tuple)):
                         for j, i in enumerate(idxs):
@@ -443,7 +431,6 @@ class GlobalBatcher:
                 )
             )
 
-            prev_h = [self._prev_hypotheses[slot]]
             prev_p = [self._prev_pred_out[slot]]
 
             with torch.inference_mode():
@@ -461,7 +448,7 @@ class GlobalBatcher:
                     cache_last_time=cache_t,
                     cache_last_channel_len=cache_ch_len,
                     keep_all_outputs=True,
-                    previous_hypotheses=prev_h,
+                    previous_hypotheses=None,
                     previous_pred_out=prev_p,
                     drop_extra_pre_encoded=int(self.model.encoder.streaming_cfg.drop_extra_pre_encoded),
                     return_transcription=True,
@@ -477,7 +464,7 @@ class GlobalBatcher:
             self._scatter_cache_rows(self._cache_t, cache_t_new, [slot])
             self._scatter_cache_rows(self._cache_ch_len, cache_ch_len_new, [slot])
 
-            # Persist RNNT predictor + hypotheses for completeness
+            # Persist RNNT predictor for completeness (do not carry previous_hypotheses)
             try:
                 if isinstance(pred_out_stream, (list, tuple)):
                     self._prev_pred_out[slot] = pred_out_stream[0] if pred_out_stream else None
@@ -485,12 +472,7 @@ class GlobalBatcher:
                     self._prev_pred_out[slot] = pred_out_stream
             except Exception:
                 self._prev_pred_out[slot] = None
-
-            try:
-                if isinstance(new_prev_hypotheses, (list, tuple)) and new_prev_hypotheses:
-                    self._prev_hypotheses[slot] = new_prev_hypotheses[0]
-            except Exception:
-                pass
+            # Do not persist new_prev_hypotheses
 
             # Extract text and enqueue as an interim
             h0 = transcribed_texts[0] if isinstance(transcribed_texts, (list, tuple)) else transcribed_texts
