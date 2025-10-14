@@ -43,6 +43,7 @@ class MoonshineBackend:
             precision=precision,
             autocast_dtype=self._autocast_dtype,
         )
+        self._min_samples = 512
         self._processor = AutoProcessor.from_pretrained(
             cfg.model_id,
             trust_remote_code=True,
@@ -120,19 +121,21 @@ class MoonshineBackend:
             _ = self._processor.batch_decode(tokens, skip_special_tokens=True)
         _LOG.info("Warmup complete (%d samples)", samples)
 
-    @staticmethod
-    def _prepare_batch(audios: Sequence[np.ndarray]) -> list[np.ndarray]:
-        min_samples = 512  # ensure at least 32 ms of audio at 16 kHz
+    @property
+    def min_samples(self) -> int:
+        return self._min_samples
+
+    def _prepare_batch(self, audios: Sequence[np.ndarray]) -> list[np.ndarray]:
         cleaned: list[np.ndarray] = []
         for idx, audio in enumerate(audios):
             if audio.size == 0:
-                cleaned.append(np.zeros(min_samples, dtype=np.float32))
+                cleaned.append(np.zeros(self._min_samples, dtype=np.float32))
                 continue
             arr = np.asarray(audio, dtype=np.float32)
             if arr.ndim != 1:
                 arr = arr.reshape(-1)
-            if arr.size < min_samples:
-                arr = np.pad(arr, (0, min_samples - arr.size), mode="constant")
+            if arr.size < self._min_samples:
+                arr = np.pad(arr, (0, self._min_samples - arr.size), mode="constant")
             cleaned.append(arr)
         return cleaned
 

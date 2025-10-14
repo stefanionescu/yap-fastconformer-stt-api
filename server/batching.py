@@ -87,6 +87,16 @@ class BatchTranscriber:
                 if req.is_final:
                     zero_final.append(req.session)
                 continue
+            if req.audio.size < self._backend.min_samples:
+                _LOG.debug(
+                    "Session %s audio below min_samples (%d < %d); treating as silence",
+                    req.session.sid,
+                    req.audio.size,
+                    self._backend.min_samples,
+                )
+                if req.is_final:
+                    zero_final.append(req.session)
+                continue
             _LOG.debug("Session %s audio samples=%d", req.session.sid, req.audio.size)
             payloads.append(req.audio)
             final_flags.append(req.is_final)
