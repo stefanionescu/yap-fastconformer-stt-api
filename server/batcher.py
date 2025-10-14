@@ -404,7 +404,7 @@ class GlobalBatcher:
                 for i in idxs:
                     self._slot_step[slots[i]] += 1
 
-                # Fanout accumulated transcript text
+                # Fanout running transcript text (replace on change)
                 now_ms = int(time.time() * 1000)
                 texts = self._decode_batch_texts(transcribed_texts, len(idxs))
                 for k, i in enumerate(idxs):
@@ -417,16 +417,11 @@ class GlobalBatcher:
                         continue
 
                     current = self._running_text[slot]
-                    if len(txt) >= len(current) and txt.startswith(current):
-                        merged = txt
-                    else:
-                        merged = (current + (" " if current and not current.endswith(" ") else "") + txt).strip()
-
-                    if merged != current:
-                        self._running_text[slot] = merged
-                        self._last_text[slot] = merged
+                    if txt != current:
+                        self._running_text[slot] = txt
+                        self._last_text[slot] = txt
                         try:
-                            self.results.put_nowait((sid, merged, now_ms))
+                            self.results.put_nowait((sid, txt, now_ms))
                         except asyncio.QueueFull:
                             pass
 
@@ -511,24 +506,16 @@ class GlobalBatcher:
             except Exception:
                 self._prev_hypotheses[slot] = None
 
-            # Extract text and enqueue as an interim
+            # Extract text and enqueue as final replacement
             h0 = transcribed_texts[0] if isinstance(transcribed_texts, (list, tuple)) else transcribed_texts
             text = self._decode_single_text(h0)
             slot = self._sid2slot.get(sid)
-            merged = text or ""
             if slot is not None:
-                current = self._running_text[slot]
-                if merged:
-                    if len(merged) >= len(current) and merged.startswith(current):
-                        final_text = merged
-                    else:
-                        final_text = (current + (" " if current and not current.endswith(" ") else "") + merged).strip()
-                else:
-                    final_text = current or self._last_text[slot]
+                final_text = text or self._running_text[slot] or self._last_text[slot]
                 self._running_text[slot] = final_text
                 self._last_text[slot] = final_text
             else:
-                final_text = merged
+                final_text = text or ""
 
             try:
                 self.results.put_nowait((sid, final_text, int(time.time() * 1000)))
