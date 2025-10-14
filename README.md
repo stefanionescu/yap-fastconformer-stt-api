@@ -13,28 +13,23 @@ Moonshine-based real-time speech-to-text service with GPU batching, WebRTC data-
 - `pkg-config` (required to build PyAV for WebRTC transport)
 - `ffmpeg` (used by the sample tooling for audio resampling)
 
-Install them via your package manager, e.g. `brew install pkg-config ffmpeg` on macOS or `apt install pkg-config ffmpeg libavformat-dev libavdevice-dev libavcodec-dev libavutil-dev libswscale-dev libopus-dev libvpx-dev` on Debian/Ubuntu. The helper `scripts/install.sh` will attempt to install these automatically when run with sufficient privileges.
+Install them via your package manager, e.g. `brew install pkg-config ffmpeg` on macOS or `apt install pkg-config ffmpeg libavformat-dev libavdevice-dev libavcodec-dev libavutil-dev libswscale-dev libopus-dev libvpx-dev` on Debian/Ubuntu. The helper `scripts/core/install.sh` will attempt to install these automatically when run with sufficient privileges.
 
-## Local Quickstart
+## One-Step Quickstart
 ```bash
-# 1) Create a virtual environment + install deps (CPU torch by default)
-bash scripts/install.sh
-
-# 2) Launch the server (defaults to 0.0.0.0:8000)
-bash scripts/start.sh
-
-# 3) Run a warmup / health check
-bash scripts/warmup.sh --file mid.wav --rtf 10 --full-text
-
-# 4) Try streaming from the sample client
-bash scripts/client.sh --file mid.wav --rtf 1 --full-text
+bash scripts/run_all.sh
 ```
 
-### GPU wheel override
-Set `TORCH_CUDA` before running `scripts/install.sh` to install a specific CUDA wheel, e.g.:
+This single command installs dependencies (or reuses the cached venv), launches the server, and tails the unified log at `logs/moonshine.log`. You can `Ctrl+C` the tail and the background service keeps running.
+
+### Manual control / GPU overrides
+If you need to customise the install step (e.g., selecting a different CUDA wheel), run:
 ```bash
-TORCH_CUDA=cu121 TORCH_VERSION=2.4.0 bash scripts/install.sh
+TORCH_CUDA=cu121 TORCH_VERSION=2.4.0 bash scripts/core/install.sh
+bash scripts/core/start.sh
 ```
+
+Utility runners for tests live under `scripts/test/` (see below), or you can use `scripts/stop.sh` to tear everything down.
 
 ## Docker Quickstart
 ```bash
@@ -74,12 +69,14 @@ If an error occurs the server sends `{"op":"error","reason":"..."}` and closes t
 - `MODEL_WARMUP_SECONDS` (default `1.5`)
 
 ## Scripts
-- `scripts/install.sh` — bootstrap virtualenv + install dependencies
-- `scripts/start.sh` — start the ASR server using the active venv
-- `scripts/warmup.sh` — run warmup/latency probe against a server
-- `scripts/client.sh` — simple CLI client for manual testing
-- `scripts/bench.sh` — concurrency benchmark harness
-- `scripts/stop.sh` — stop the server, drop caches, remove the local venv, and uninstall any system packages `scripts/install.sh` added
+- `scripts/run_all.sh` — fire-and-forget install→launch pipeline with live log tail
+- `scripts/install_and_start.sh` — helper invoked by `run_all.sh` (install + launch) — typically not called directly
+- `scripts/core/install.sh` — bootstrap virtualenv + install dependencies
+- `scripts/core/start.sh` — start the ASR server using the active venv
+- `scripts/stop.sh` — stop the server, drop caches, remove the local venv, and uninstall any system packages `scripts/core/install.sh` added
+- `scripts/test/warmup.sh` — run warmup/latency probe against a server
+- `scripts/test/client.sh` — simple CLI client for manual testing
+- `scripts/test/bench.sh` — concurrency benchmark harness
 
 Each script honours `VENV_PATH` if you want to reuse a custom environment.
 

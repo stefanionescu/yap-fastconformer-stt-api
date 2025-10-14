@@ -97,12 +97,12 @@ class MoonshineBackend:
                 }
             )
         else:
-            torch_dtype = {
+            dtype = {
                 "fp16": torch.float16,
                 "bf16": torch.bfloat16,
                 "fp32": torch.float32,
             }.get(precision, torch.float16)
-            kwargs.update({"torch_dtype": torch_dtype})
+            kwargs.update({"dtype": dtype})
         model_cls = _MoonshineModel or AutoModelForSpeechSeq2Seq
         model = model_cls.from_pretrained(cfg.model_id, **kwargs)
         if precision != "int8":
