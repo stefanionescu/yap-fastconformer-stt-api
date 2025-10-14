@@ -122,7 +122,7 @@ class MoonshineBackend:
 
     @staticmethod
     def _prepare_batch(audios: Sequence[np.ndarray]) -> list[np.ndarray]:
-        min_samples = 320  # ensure at least 20 ms of audio at 16 kHz
+        min_samples = 288  # minimum receptive field for Moonshine conv stack (18 ms @ 16 kHz)
         cleaned: list[np.ndarray] = []
         for idx, audio in enumerate(audios):
             if audio.size == 0:

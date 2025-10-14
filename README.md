@@ -24,6 +24,10 @@ This single command installs dependencies (or reuses the cached venv), launches 
 ```bash
 tail -f logs/moonshine.log
 ```
+Check the last 200 log lines without following:
+```bash
+tail -n 200 logs/moonshine.log
+```
 
 ### Manual control / GPU overrides
 If you need to customise the install step (e.g., selecting a different CUDA wheel), run:
@@ -92,16 +96,16 @@ Each script honours `VENV_PATH` if you want to reuse a custom environment.
 Example usage (assumes the server is running):
 ```bash
 # Local GPU smoke test
-bash scripts/test/warmup.sh --file samples/mid.wav --rtf 10 --full-text
+bash scripts/test/warmup.sh --file mid.wav --rtf 10 --full-text
 
 # Local GPU benchmark
-bash scripts/test/bench.sh --file samples/mid.wav --rtf 1.0 --n 20 --concurrency 4
+bash scripts/test/bench.sh --file mid.wav --rtf 1.0 --n 20 --concurrency 4
 
 # Remote RunPod call using profile defaults
 python tests/client.py --print-partials
 
 # Override with explicit HTTPS endpoint
-python tests/client.py --https-url https://your-runpod-endpoint/webrtc --api-key "$RUNPOD_API_KEY" --file samples/mid.wav
+python tests/client.py --https-url https://your-runpod-endpoint/webrtc --api-key "$RUNPOD_API_KEY" --file mid.wav
 ```
 > **Note:** The helper scripts under `scripts/test/` automatically activate `.venv`. If you invoke the Python modules directly (e.g. `python tests/client.py`) make sure the virtual environment created by `scripts/core/install.sh` is activated first (`source .venv/bin/activate`).
 
@@ -119,7 +123,7 @@ RUNPOD_HTTPS_URL=https://your-endpoint.example.com/webrtc
 ```
 Values in `.env` are automatically loaded but can be overridden via CLI flags or environment variables (`RUNPOD_API_KEY`, `RUNPOD_HTTPS_URL`, etc.).
 
-All scripts/tests stream 16 kHz PCM16 mono audio from files under `samples/` by default.
+All scripts/tests stream 16 kHz PCM16 mono audio from files under `` by default.
 
 ## Docker Assets
 - `docker/Dockerfile` — CUDA 12.1 runtime base with torch 2.4.0+cu121
