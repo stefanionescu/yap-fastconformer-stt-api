@@ -1,10 +1,10 @@
 # Parakeet-TDT Streaming ASR Server
 
-Self-hosted Parakeet-TDT-0.6B-V3 streaming speech-to-text server built on the latest NeMo 2.4 toolchain. Audio arrives over a FastAPI WebSocket endpoint, partial hypotheses stream out in real time, and the final transcript flushes as soon as you emit an EOS control frame.
+Self-hosted Parakeet-TDT-0.6B-V3 streaming speech-to-text server built on the NeMo 2.4 toolchain. Audio arrives over a FastAPI WebSocket endpoint, partial hypotheses stream out in real time, and the final transcript flushes as soon as you emit an EOS control frame.
 
 ## Highlights
 - True RNNT streaming via NeMo’s `partial_hypothesis` interface — no fake chunking
-- Single-command installer (`./main.sh`) that runs fully detached, with all logs coalesced into `logs/latest.log`
+- Single-command installer (`./scripts/main.sh`) that runs fully detached, with all logs coalesced into `logs/latest.log`
 - Scripted orchestration for environment checks, apt packages, Python 3.12 virtualenv, CUDA 12.1 PyTorch wheels, requirements, model prefetch, and server launch
 - FastAPI + uvicorn + uvloop WebSocket server, tuned for low-latency multilingual transcription
 - CLI clients and benchmarks for smoke tests, warmup, and concurrency sizing
@@ -17,7 +17,7 @@ Self-hosted Parakeet-TDT-0.6B-V3 streaming speech-to-text server built on the la
 
 ## One-Command Quickstart (non-Docker)
 ```bash
-./main.sh
+./scripts/main.sh
 ```
 
 What happens:
@@ -28,34 +28,34 @@ What happens:
 5. `scripts/04_prefetch_model.sh` caches `nvidia/parakeet-tdt-0.6b-v3` via `huggingface_hub`.
 6. `scripts/05_run_server.sh` activates `.venv` and execs `uvicorn server:app` on `0.0.0.0:8080`.
 
-All stdout/stderr is appended to `logs/run_<timestamp>.log` with a symlink at `logs/latest.log`. `main.sh` automatically tails the log after launching; hit `Ctrl+C` to drop the tail — the background process keeps running. Logs are still available via:
+All stdout/stderr is appended to `logs/run_<timestamp>.log` with a symlink at `logs/latest.log`. `scripts/main.sh` automatically tails the log after launching; hit `Ctrl+C` to drop the tail — the background process keeps running. Logs are still available via:
 ```bash
 tail -f logs/latest.log
 ```
 
 Stop the detached pipeline (and uvicorn) with:
 ```bash
-./stop.sh
+./scripts/stop.sh
 ```
 
-`stop.sh` kills the PID stored in `.run.pid` or falls back to `pkill -f "uvicorn server:app"`.
+`scripts/stop.sh` kills the PID stored in `.run.pid` or falls back to `pkill -f "uvicorn server:app"`.
 
 ### Tuning knobs
-Override before invoking `./main.sh` (or export globally):
+Override before invoking `./scripts/main.sh` (or export globally):
 - `STEP_MS` (default `240`)
 - `RIGHT_CONTEXT_MS` (default `160`)
 - `MAX_INFLIGHT_STEPS` (default `1`)
 - `HF_HOME` (default `$(pwd)/.cache/hf`)
 
 ### Scripts overview
-- `scripts/00_env_check.sh` — sanity checks for GPU + Python 3.12
-- `scripts/01_system_deps.sh` — apt dependencies (uses `sudo` if necessary)
-- `scripts/02_python_env.sh` — virtualenv bootstrap and base tooling upgrade
-- `scripts/03_python_deps.sh` — installs CUDA 12.1 PyTorch 2.4.0 stack + project requirements
-- `scripts/04_prefetch_model.py|.sh` — caches Parakeet-TDT-0.6B-V3 into `HF_HOME`
-- `scripts/05_run_server.sh` — activates `.venv` and launches `uvicorn`
-- `main.sh` — orchestrates the full chain in the background, tails logs for you
-- `stop.sh` — stops the detached pipeline and preserves logs
+- `scripts/main.sh` — orchestrates the full chain in the background, tails logs for you
+- `scripts/stop.sh` — stops the detached pipeline and preserves logs
+- `scripts/steps/00_env_check.sh` — sanity checks for GPU + Python 3.12
+- `scripts/steps/01_system_deps.sh` — apt dependencies (uses `sudo` if necessary)
+- `scripts/steps/02_python_env.sh` — virtualenv bootstrap and base tooling upgrade
+- `scripts/steps/03_python_deps.sh` — installs CUDA 12.1 PyTorch 2.4.0 stack + project requirements
+- `scripts/steps/04_prefetch_model.py|.sh` — caches Parakeet-TDT-0.6B-V3 into `HF_HOME`
+- `scripts/steps/05_run_server.sh` — activates `.venv` and launches `uvicorn`
 
 ## WebSocket Protocol
 Endpoint: `ws://<host>:8080/ws`
@@ -72,22 +72,22 @@ All clients assume `.venv` is active (`source .venv/bin/activate`) or you run vi
 
 ### Smoke test
 ```bash
-. .venv/bin/python tests/client.py --file mid.wav --full-text
+./.venv/bin/python tests/client.py --file mid.wav --full-text
 ```
 
 ### Warmup / latency probe
 ```bash
-. .venv/bin/python tests/warmup.py --file mid.wav --rtf 10 --print-partials
+./.venv/bin/python tests/warmup.py --file mid.wav --rtf 10 --print-partials
 ```
 
 ### Concurrency benchmark
 ```bash
-. .venv/bin/python tests/bench.py --url ws://127.0.0.1:8080/ws --file mid.wav --n 64 --concurrency 16
+./.venv/bin/python tests/bench.py --url ws://127.0.0.1:8080/ws --streams 64 --duration 30
 ```
 
 ### Standalone utilities
-- `client.py` — minimal CLI client (`client.py path/to/audio.wav --url ws://…`)
-- `bench_concurrency.py` — synthetic tone generator that hammers the server with many simultaneous streams
+- `tests/client.py` — minimal CLI client (`python tests/client.py --file mid.wav --url ws://…`)
+- `tests/bench.py` — synthetic tone generator that hammers the server with many simultaneous streams
 
 ## Docker Workflow
 ```bash
@@ -121,13 +121,13 @@ huggingface_hub[hf-xet], hf_transfer, numpy<2
 PyTorch (torch/torchvision/torchaudio 2.4.0) is installed separately via `scripts/03_python_deps.sh` to ensure the CUDA 12.1 wheels are pulled from the official index.
 
 ## Notes
-- The first `./main.sh` run downloads ~2.5 GB of model weights. Subsequent runs reuse `HF_HOME`.
+- The first `./scripts/main.sh` run downloads ~2.5 GB of model weights. Subsequent runs reuse `HF_HOME`.
 - The server loads the NeMo checkpoint on import, so expect ~20 s of initialisation on cold GPU nodes.
 - Set `HF_HUB_ENABLE_HF_TRANSFER=1` to accelerate model downloads via the Rust binary.
 - Use `MAX_INFLIGHT_STEPS>1` when the GPU has headroom to parallelise RNNT calls.
 
 ## Troubleshooting
 - `ERROR: nvidia-smi not found` → install the proprietary NVIDIA driver + CUDA toolkit runtime first.
-- `python3.12: command not found` → rerun `./main.sh` as a user with sudo privileges so apt can install Python 3.12.
+- `python3.12: command not found` → rerun `./scripts/main.sh` as a user with sudo privileges so apt can install Python 3.12.
 - Hugging Face download stalls → ensure outbound HTTPS is allowed or pre-populate the cache and export `HF_HOME`.
-- To reset everything, delete `.venv`, `.cache/hf`, `logs/*`, and rerun `./main.sh`.
+- To reset everything, delete `.venv`, `.cache/hf`, `logs/*`, and rerun `./scripts/main.sh`.

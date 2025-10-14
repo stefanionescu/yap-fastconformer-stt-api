@@ -18,7 +18,7 @@ WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
 COPY scripts /app/scripts
-RUN chmod +x /app/scripts/*.sh
+RUN chmod +x /app/scripts/*.sh /app/scripts/steps/*.sh
 
 RUN python3.12 -m venv /app/.venv \
     && . /app/.venv/bin/activate \
@@ -26,9 +26,7 @@ RUN python3.12 -m venv /app/.venv \
     && pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
     && pip install -r /app/requirements.txt
 
-COPY server.py /app/server.py
-COPY client.py /app/client.py
-COPY bench_concurrency.py /app/bench_concurrency.py
+COPY server /app/server
 COPY tests /app/tests
 COPY samples /app/samples
 COPY docker/entrypoint.sh /app/entrypoint.sh

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).log}"
 PID_FILE="$ROOT_DIR/.run.pid"
@@ -24,12 +24,12 @@ fi
 
 CHAIN="set -euo pipefail
 cd \"$ROOT_DIR\"
-./scripts/00_env_check.sh
-./scripts/01_system_deps.sh
-./scripts/02_python_env.sh
-./scripts/03_python_deps.sh
-./scripts/04_prefetch_model.sh
-exec ./scripts/05_run_server.sh
+./scripts/steps/00_env_check.sh
+./scripts/steps/01_system_deps.sh
+./scripts/steps/02_python_env.sh
+./scripts/steps/03_python_deps.sh
+./scripts/steps/04_prefetch_model.sh
+exec ./scripts/steps/05_run_server.sh
 "
 
 echo "[main] Launching detached setup. Log: $LOG_FILE"
@@ -39,7 +39,7 @@ PIPE_PID=$!
 echo "$PIPE_PID" > "$PID_FILE"
 
 echo "[main] Detached. Tail live logs with: tail -f $LOG_DIR/latest.log"
-echo "[main] Stop with: ./stop.sh"
+echo "[main] Stop with: ./scripts/stop.sh"
 
 timeout=30
 while [[ ! -f "$LOG_FILE" && $timeout -gt 0 ]]; do

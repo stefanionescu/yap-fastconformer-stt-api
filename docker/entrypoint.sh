@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd /app
-exec ./scripts/05_run_server.sh
+exec ./scripts/steps/05_run_server.sh

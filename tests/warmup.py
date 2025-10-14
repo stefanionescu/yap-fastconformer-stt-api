@@ -4,15 +4,23 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import sys
+from pathlib import Path
 
-from common import load_audio, resolve_sample_path, stream_session
+if __package__ in {None, ""}:
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-DEFAULT_WS_URL = os.getenv("WS", "ws://127.0.0.1:8080/ws")
+from tests.client import (  # noqa: E402
+    SAMPLE_RATE,
+    load_audio,
+    resolve_sample_path,
+    stream_session,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Warmup Parakeet streaming endpoint")
-    parser.add_argument("--url", default=DEFAULT_WS_URL, help="WebSocket endpoint")
+    parser.add_argument("--url", default=os.getenv("WS", "ws://127.0.0.1:8080/ws"), help="WebSocket endpoint")
     parser.add_argument("--file", default="mid.wav", help="Audio file (absolute path or under samples/)")
     parser.add_argument("--rtf", type=float, default=10.0, help="Real-time factor (higher = faster send)")
     parser.add_argument("--frame-ms", type=int, default=20, help="Frame size in milliseconds")
@@ -27,7 +35,7 @@ async def run_once(args: argparse.Namespace) -> int:
         print(f"Audio not found: {audio_path}")
         return 2
     audio = load_audio(audio_path)
-    duration = len(audio) / 16000.0
+    duration = len(audio) / SAMPLE_RATE
     result = await stream_session(
         args.url,
         audio,

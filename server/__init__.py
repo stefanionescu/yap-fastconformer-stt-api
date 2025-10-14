@@ -29,7 +29,6 @@ model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt
 model.eval()
 model.freeze()
 
-# Greedy decoding gives predictable low-latency streaming behaviour
 _decoding_cfg = OmegaConf.create(
     {
         "strategy": "greedy",
@@ -139,3 +138,6 @@ async def ws_endpoint(ws: WebSocket) -> None:
             await ws.close(code=1011, reason=str(exc))
         except Exception:
             pass
+
+
+__all__ = ["app"]
