@@ -21,13 +21,41 @@ def load_fastconformer(
         raise RuntimeError("Model does not support multiple lookaheads.")
 
     if hasattr(asr, "change_decoding_strategy"):
-        # Align with NVIDIA streaming example: disable fused batching in RNNT decoding for streaming
+        # Force non-fused greedy RNNT for streaming; avoid fused "blank-as-pad" path
         if decoder_type == "rnnt":
             try:
-                rnnt_cfg = RNNTDecodingConfig(fused_batch_size=-1)
+                rnnt_cfg = RNNTDecodingConfig(strategy="greedy")
+                # Best effort: explicitly disable fused batching knobs if present on this config
+                try:
+                    setattr(rnnt_cfg, "fused_batch_size", -1)
+                except Exception:
+                    pass
                 asr.change_decoding_strategy(rnnt_cfg, decoder_type=decoder_type)
             except Exception:
-                asr.change_decoding_strategy(decoder_type=decoder_type)
+                # Fallback to any signature that accepts decoding_cfg as a dict
+                try:
+                    asr.change_decoding_strategy(decoding_cfg={"strategy": "greedy"}, decoder_type=decoder_type)
+                except Exception:
+                    asr.change_decoding_strategy(decoder_type=decoder_type)
+
+            # Also flip decoder-level fused switches when available
+            dec = getattr(asr, "decoding", None)
+            if dec is not None:
+                if hasattr(dec, "greedy_fused_batch_size"):
+                    try:
+                        dec.greedy_fused_batch_size = -1
+                    except Exception:
+                        pass
+                if hasattr(dec, "fused_batch_size"):
+                    try:
+                        dec.fused_batch_size = -1
+                    except Exception:
+                        pass
+                if hasattr(dec, "use_gpu_kernels"):
+                    try:
+                        dec.use_gpu_kernels = False
+                    except Exception:
+                        pass
         else:
             asr.change_decoding_strategy(decoder_type=decoder_type)
 

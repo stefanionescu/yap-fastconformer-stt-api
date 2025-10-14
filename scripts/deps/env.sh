@@ -10,7 +10,7 @@ export ASR_MODEL="nvidia/stt_en_fastconformer_hybrid_large_streaming_multi"
 export ASR_ATT_CTX="70,1"
 export ASR_DECODER="rnnt"
 export ASR_DEVICE="cuda:0"
-export ASR_STEP_MS="20"
+export ASR_STEP_MS="80"
 export ASR_MAX_BATCH="64"
 
 # Python performance knobs
