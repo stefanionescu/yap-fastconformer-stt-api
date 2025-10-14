@@ -16,8 +16,7 @@ class Config:
     max_batch_size: int = 32
     max_batch_wait_ms: int = 10
     sample_rate: int = 16000
-    max_buffer_seconds: float = 120.0
-    idle_session_timeout_s: float = 30.0
+    max_buffer_seconds: float = 90.0
     linger_after_close_ms: int = 250
     http_offer_path: str = "/webrtc"
     log_level: str = "INFO"
@@ -39,8 +38,7 @@ def load_config() -> Config:
     max_batch_size = max(1, int(os.environ.get("MAX_BATCH_SIZE", "32") or 32))
     max_batch_wait_ms = max(1, int(os.environ.get("MAX_BATCH_WAIT_MS", "10") or 10))
     sample_rate = int(os.environ.get("ASR_SAMPLE_RATE", "16000") or 16000)
-    max_buffer_seconds = float(os.environ.get("MAX_BUFFER_SECONDS", "120.0") or 120.0)
-    idle_session_timeout_s = float(os.environ.get("SESSION_IDLE_TIMEOUT", "30.0") or 30.0)
+    max_buffer_seconds = float(os.environ.get("MAX_BUFFER_SECONDS", "90.0") or 90.0)
     linger_after_close_ms = int(os.environ.get("WEBSOCKET_LINGER_MS", "250") or 250)
     http_offer_path = _env("WEBRTC_OFFER_PATH", "/webrtc") or "/webrtc"
     log_level = _env("ASR_LOG_LEVEL", "INFO") or "INFO"
@@ -56,7 +54,6 @@ def load_config() -> Config:
         max_batch_wait_ms=max_batch_wait_ms,
         sample_rate=sample_rate,
         max_buffer_seconds=max_buffer_seconds,
-        idle_session_timeout_s=idle_session_timeout_s,
         linger_after_close_ms=linger_after_close_ms,
         http_offer_path=http_offer_path,
         log_level=log_level,

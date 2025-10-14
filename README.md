@@ -72,7 +72,7 @@ If an error occurs the server sends `{"op":"error","reason":"..."}` and closes t
 - `MOONSHINE_PRECISION` (`fp16`, `bf16`, `fp32`, `int8`; default `fp16`)
 - `MAX_BATCH_SIZE` (default `32`)
 - `MAX_BATCH_WAIT_MS` (default `10`)
-- `MAX_BUFFER_SECONDS` (default `120`)
+- `MAX_BUFFER_SECONDS` (default `90`)
 - `MODEL_WARMUP_SECONDS` (default `1.5`)
 
 ## Scripts
