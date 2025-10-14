@@ -6,12 +6,17 @@ from typing import Iterable, Sequence
 
 import numpy as np
 import torch
-from transformers import AutoProcessor, MoonshineForConditionalGeneration
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
 try:  # Optional dependency for int8 loading
     from transformers import BitsAndBytesConfig  # type: ignore
 except ImportError:  # pragma: no cover - optional
     BitsAndBytesConfig = None  # type: ignore[misc,assignment]
+
+try:
+    from transformers import MoonshineForConditionalGeneration as _MoonshineModel
+except ImportError:  # pragma: no cover - older transformers
+    _MoonshineModel = None
 
 from .config import Config
 
@@ -64,7 +69,7 @@ class MoonshineBackend:
             return torch.bfloat16
         return None
 
-    def _load_model(self, cfg: Config, device: torch.device) -> MoonshineForConditionalGeneration:
+    def _load_model(self, cfg: Config, device: torch.device) -> torch.nn.Module:
         precision = cfg.precision
         kwargs = {"trust_remote_code": True}
         quant_config = None
@@ -87,7 +92,8 @@ class MoonshineBackend:
                 "fp32": torch.float32,
             }.get(precision, torch.float16)
             kwargs.update({"torch_dtype": torch_dtype})
-        model = MoonshineForConditionalGeneration.from_pretrained(cfg.model_id, **kwargs)
+        model_cls = _MoonshineModel or AutoModelForSpeechSeq2Seq
+        model = model_cls.from_pretrained(cfg.model_id, **kwargs)
         if precision != "int8":
             model.to(device)
         return model
