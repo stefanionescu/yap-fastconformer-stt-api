@@ -76,6 +76,11 @@ done
 # --- Clear user-level caches related to this project ---
 CACHE_PATHS=(
   "$HOME/.cache/onnxruntime"
+  "$HOME/.cache/useful-moonshine"
+  "$HOME/.cache/tokenizers"
+  "$HOME/.cache/huggingface"
+  "$HOME/.local/share/huggingface"
+  "$HOME/.config/huggingface"
   "$HOME/.cache/pip"
   "$HOME/.cache/aiohttp"
   "$HOME/.cache/aioice"
@@ -84,6 +89,8 @@ CACHE_PATHS=(
   "$HOME/.local/share/aiortc"
   "$HOME/.local/state/aiortc"
   "$HOME/.config/aiortc"
+  "$HOME/.local/share/useful-moonshine"
+  "$HOME/.config/useful-moonshine"
 )
 for cache_dir in "${CACHE_PATHS[@]}"; do
   if [[ -e "$cache_dir" ]]; then
