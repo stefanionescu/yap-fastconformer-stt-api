@@ -109,6 +109,8 @@ class GlobalBatcher:
 
         # Track last emitted transcript per slot to avoid redundant queue traffic
         self._last_text: List[str] = ["" for _ in range(self.max_slots)]
+        # Maintain a running transcript per slot by accumulating per-tick deltas
+        self._running_text: List[str] = ["" for _ in range(self.max_slots)]
 
         # --- Pre-encode feature cache (features) per slot ---
         try:
@@ -132,6 +134,11 @@ class GlobalBatcher:
             (self.max_slots, n_mels, pre_cache_frames), dtype=torch.float32, device=self.device
         )
 
+        # One-time init log with step sizing
+        self._log_debug(
+            f"init: step_ms={self.step_ms} samples_per_step={self.samples_per_step}",
+        )
+
     async def add_stream(self, sid: str, sr: int = 16000):
         async with self._lock:
             if sid in self._sid2slot:
@@ -145,6 +152,7 @@ class GlobalBatcher:
             self._prev_hypotheses[slot] = None
             self._prev_pred_out[slot] = None
             self._last_text[slot] = ""
+            self._running_text[slot] = ""
             # Reset caches and slot step
             _rec_zero_slot(self._cache_ch, slot)
             _rec_zero_slot(self._cache_t, slot)
@@ -177,6 +185,7 @@ class GlobalBatcher:
                 self._free_slots.sort()
             if slot is not None:
                 self._last_text[slot] = ""
+                self._running_text[slot] = ""
 
     async def push_audio(self, sid: str, pcm16: bytes):
         st = self._streams.get(sid)
@@ -318,6 +327,7 @@ class GlobalBatcher:
                     )
                 )
 
+                prev_h = [self._prev_hypotheses[slots[i]] for i in idxs]
                 prev_p = [self._prev_pred_out[slots[i]] for i in idxs]
 
                 with torch.inference_mode():
@@ -335,7 +345,7 @@ class GlobalBatcher:
                         cache_last_time=cache_t,
                         cache_last_channel_len=cache_ch_len,
                         keep_all_outputs=False,
-                        previous_hypotheses=None,
+                        previous_hypotheses=prev_h,
                         previous_pred_out=prev_p,
                         drop_extra_pre_encoded=int(drop),
                         return_transcription=True,
@@ -366,7 +376,7 @@ class GlobalBatcher:
                         tail = torch.cat([pad, feats_cat], dim=-1)
                     self._pre_cache.index_copy_(0, idx_t, tail)
 
-                # Persist RNNT predictor state only (no previous_hypotheses for frame-loop greedy)
+                # Persist RNNT predictor state
                 try:
                     if isinstance(pred_out_stream, (list, tuple)):
                         for j, i in enumerate(idxs):
@@ -378,11 +388,23 @@ class GlobalBatcher:
                     for i in idxs:
                         self._prev_pred_out[slots[i]] = None
 
+                # Persist RNNT previous_hypotheses for label-loop greedy
+                try:
+                    if isinstance(new_prev_hypotheses, (list, tuple)):
+                        for j, i in enumerate(idxs):
+                            self._prev_hypotheses[slots[i]] = new_prev_hypotheses[j] if j < len(new_prev_hypotheses) else None
+                    else:
+                        for i in idxs:
+                            self._prev_hypotheses[slots[i]] = None
+                except Exception:
+                    for i in idxs:
+                        self._prev_hypotheses[slots[i]] = None
+
                 # Bump slot steps
                 for i in idxs:
                     self._slot_step[slots[i]] += 1
 
-                # Fanout text
+                # Fanout accumulated transcript text
                 now_ms = int(time.time() * 1000)
                 texts = self._decode_batch_texts(transcribed_texts, len(idxs))
                 for k, i in enumerate(idxs):
@@ -391,14 +413,22 @@ class GlobalBatcher:
                     txt = texts[k] if k < len(texts) else ""
                     if slot is None:
                         continue
-                    if txt and txt != self._last_text[slot]:
-                        self._last_text[slot] = txt
-                    elif not txt:
+                    if not txt:
                         continue
-                    try:
-                        self.results.put_nowait((sid, txt, now_ms))
-                    except asyncio.QueueFull:
-                        pass
+
+                    current = self._running_text[slot]
+                    if len(txt) >= len(current) and txt.startswith(current):
+                        merged = txt
+                    else:
+                        merged = (current + (" " if current and not current.endswith(" ") else "") + txt).strip()
+
+                    if merged != current:
+                        self._running_text[slot] = merged
+                        self._last_text[slot] = merged
+                        try:
+                            self.results.put_nowait((sid, merged, now_ms))
+                        except asyncio.QueueFull:
+                            pass
 
             # 1) initialize newcomers with drop=0
             run_cohort(new_idxs, drop=0)
@@ -431,6 +461,7 @@ class GlobalBatcher:
                 )
             )
 
+            prev_h = [self._prev_hypotheses[slot]]
             prev_p = [self._prev_pred_out[slot]]
 
             with torch.inference_mode():
@@ -448,7 +479,7 @@ class GlobalBatcher:
                     cache_last_time=cache_t,
                     cache_last_channel_len=cache_ch_len,
                     keep_all_outputs=True,
-                    previous_hypotheses=None,
+                    previous_hypotheses=prev_h,
                     previous_pred_out=prev_p,
                     drop_extra_pre_encoded=int(self.model.encoder.streaming_cfg.drop_extra_pre_encoded),
                     return_transcription=True,
@@ -464,7 +495,7 @@ class GlobalBatcher:
             self._scatter_cache_rows(self._cache_t, cache_t_new, [slot])
             self._scatter_cache_rows(self._cache_ch_len, cache_ch_len_new, [slot])
 
-            # Persist RNNT predictor for completeness (do not carry previous_hypotheses)
+            # Persist RNNT predictor + hypotheses for completeness
             try:
                 if isinstance(pred_out_stream, (list, tuple)):
                     self._prev_pred_out[slot] = pred_out_stream[0] if pred_out_stream else None
@@ -472,24 +503,38 @@ class GlobalBatcher:
                     self._prev_pred_out[slot] = pred_out_stream
             except Exception:
                 self._prev_pred_out[slot] = None
-            # Do not persist new_prev_hypotheses
+            try:
+                if isinstance(new_prev_hypotheses, (list, tuple)):
+                    self._prev_hypotheses[slot] = new_prev_hypotheses[0] if new_prev_hypotheses else None
+                else:
+                    self._prev_hypotheses[slot] = None
+            except Exception:
+                self._prev_hypotheses[slot] = None
 
             # Extract text and enqueue as an interim
             h0 = transcribed_texts[0] if isinstance(transcribed_texts, (list, tuple)) else transcribed_texts
-            text = ""
             text = self._decode_single_text(h0)
             slot = self._sid2slot.get(sid)
+            merged = text or ""
             if slot is not None:
-                if text:
-                    self._last_text[slot] = text
+                current = self._running_text[slot]
+                if merged:
+                    if len(merged) >= len(current) and merged.startswith(current):
+                        final_text = merged
+                    else:
+                        final_text = (current + (" " if current and not current.endswith(" ") else "") + merged).strip()
                 else:
-                    text = self._last_text[slot]
+                    final_text = current or self._last_text[slot]
+                self._running_text[slot] = final_text
+                self._last_text[slot] = final_text
+            else:
+                final_text = merged
 
             try:
-                self.results.put_nowait((sid, text, int(time.time() * 1000)))
+                self.results.put_nowait((sid, final_text, int(time.time() * 1000)))
             except asyncio.QueueFull:
                 pass
-            return text
+            return final_text
 
     def _decode_single_text(self, hyp) -> str:
         """Best-effort conversion of a NeMo streaming hypothesis into plain text."""

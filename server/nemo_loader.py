@@ -41,6 +41,11 @@ def load_fastconformer(
             # Also flip decoder-level fused switches when available
             dec = getattr(asr, "decoding", None)
             if dec is not None:
+                if hasattr(dec, "blank_as_pad"):
+                    try:
+                        dec.blank_as_pad = False
+                    except Exception:
+                        pass
                 if hasattr(dec, "greedy_fused_batch_size"):
                     try:
                         dec.greedy_fused_batch_size = -1
