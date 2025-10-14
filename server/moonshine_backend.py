@@ -122,14 +122,17 @@ class MoonshineBackend:
 
     @staticmethod
     def _prepare_batch(audios: Sequence[np.ndarray]) -> list[np.ndarray]:
+        min_samples = 320  # ensure at least 20 ms of audio at 16 kHz
         cleaned: list[np.ndarray] = []
         for idx, audio in enumerate(audios):
             if audio.size == 0:
-                cleaned.append(np.zeros(1, dtype=np.float32))
+                cleaned.append(np.zeros(min_samples, dtype=np.float32))
                 continue
             arr = np.asarray(audio, dtype=np.float32)
             if arr.ndim != 1:
                 arr = arr.reshape(-1)
+            if arr.size < min_samples:
+                arr = np.pad(arr, (0, min_samples - arr.size), mode="constant")
             cleaned.append(arr)
         return cleaned
 

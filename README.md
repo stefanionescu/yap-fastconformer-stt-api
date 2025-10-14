@@ -103,6 +103,7 @@ python tests/client.py --print-partials
 # Override with explicit HTTPS endpoint
 python tests/client.py --https-url https://your-runpod-endpoint/webrtc --api-key "$RUNPOD_API_KEY" --file samples/mid.wav
 ```
+> **Note:** The helper scripts under `scripts/test/` automatically activate `.venv`. If you invoke the Python modules directly (e.g. `python tests/client.py`) make sure the virtual environment created by `scripts/core/install.sh` is activated first (`source .venv/bin/activate`).
 
 ### RunPod environment file
 Create a simple `.env` file alongside the repo (or point `--env-file` elsewhere):
