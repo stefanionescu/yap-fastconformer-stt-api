@@ -20,7 +20,10 @@ Install them via your package manager, e.g. `brew install pkg-config ffmpeg` on 
 bash scripts/run_all.sh
 ```
 
-This single command installs dependencies (or reuses the cached venv), launches the server, and tails the unified log at `logs/moonshine.log`. You can `Ctrl+C` the tail and the background service keeps running.
+This single command installs dependencies (or reuses the cached venv), launches the server, and tails the unified log at `logs/moonshine.log`. You can `Ctrl+C` the tail and the background service keeps running. To resume log streaming later:
+```bash
+tail -f logs/moonshine.log
+```
 
 ### Manual control / GPU overrides
 If you need to customise the install step (e.g., selecting a different CUDA wheel), run:

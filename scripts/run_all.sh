@@ -21,7 +21,12 @@ if [[ -f "$PID_FILE" ]]; then
   fi
 fi
 
-nohup bash "$PIPELINE_SCRIPT" "$ROOT_DIR" "$LOG_FILE" >/dev/null 2>&1 &
+# Launch in its own session so it ignores terminal Ctrl+C
+if command -v setsid >/dev/null 2>&1; then
+  setsid bash "$PIPELINE_SCRIPT" "$ROOT_DIR" "$LOG_FILE" >/dev/null 2>&1 &
+else
+  nohup bash "$PIPELINE_SCRIPT" "$ROOT_DIR" "$LOG_FILE" >/dev/null 2>&1 &
+fi
 PIPE_PID=$!
 
 echo "$PIPE_PID" > "$PID_FILE"
