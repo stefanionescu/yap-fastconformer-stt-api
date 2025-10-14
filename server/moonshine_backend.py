@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass
 from typing import Iterable, Sequence
@@ -48,6 +49,7 @@ class MoonshineBackend:
         )
         self._model = self._load_model(cfg, device)
         self._model.eval()
+        self._target_dtype = self._detect_parameter_dtype()
         _LOG.info("Loaded Moonshine model %s on %s (%s)", cfg.model_id, device, precision)
         if cfg.warmup_seconds > 0:
             self._warmup(int(cfg.warmup_seconds * cfg.sample_rate))
@@ -71,6 +73,12 @@ class MoonshineBackend:
         if cfg.precision == "bf16":
             return torch.bfloat16
         return None
+
+    def _detect_parameter_dtype(self) -> torch.dtype | None:
+        try:
+            return next(self._model.parameters()).dtype
+        except StopIteration:  # pragma: no cover - unlikely
+            return None
 
     def _load_model(self, cfg: Config, device: torch.device) -> torch.nn.Module:
         precision = cfg.precision
@@ -106,10 +114,9 @@ class MoonshineBackend:
         audio = np.zeros((1, samples), dtype=np.float32)
         with torch.no_grad():
             inputs = self._processor(audio, sampling_rate=16000, return_tensors="pt", padding=True)
-            for key, value in inputs.items():
-                if isinstance(value, torch.Tensor):
-                    inputs[key] = value.to(self._info.device)
-            tokens = self._model.generate(**inputs, max_new_tokens=1)
+            inputs = self._to_device_dtype(inputs)
+            with self._autocast_context():
+                tokens = self._model.generate(**inputs, max_new_tokens=1)
             _ = self._processor.batch_decode(tokens, skip_special_tokens=True)
         _LOG.info("Warmup complete (%d samples)", samples)
 
@@ -132,20 +139,28 @@ class MoonshineBackend:
         batch = self._prepare_batch(audios)
         with torch.no_grad():
             inputs = self._processor(batch, sampling_rate=16000, return_tensors="pt", padding=True)
-            for key, value in list(inputs.items()):
-                if isinstance(value, torch.Tensor):
-                    inputs[key] = value.to(self._info.device)
-            autocast_dtype = self._info.autocast_dtype
-            autocast_enabled = autocast_dtype is not None and self._info.device.type in {"cuda", "mps"}
-            context = torch.autocast(
-                self._info.device.type,
-                dtype=autocast_dtype if autocast_dtype is not None else torch.float32,
-                enabled=autocast_enabled,
-            )
-            with context:
+            inputs = self._to_device_dtype(inputs)
+            with self._autocast_context():
                 tokens = self._model.generate(**inputs)
             texts = self._processor.batch_decode(tokens, skip_special_tokens=True)
         return [t.strip() for t in texts]
+
+    def _to_device_dtype(self, tensors: dict[str, object]) -> dict[str, object]:
+        for key, value in list(tensors.items()):
+            if not isinstance(value, torch.Tensor):
+                continue
+            value = value.to(self._info.device)
+            if self._info.precision != "int8" and self._target_dtype is not None:
+                value = value.to(self._target_dtype)
+            tensors[key] = value
+        return tensors
+
+    def _autocast_context(self):
+        autocast_dtype = self._info.autocast_dtype
+        enabled = autocast_dtype is not None and self._info.device.type in {"cuda", "mps"}
+        if enabled:
+            return torch.autocast(self._info.device.type, dtype=autocast_dtype)
+        return contextlib.nullcontext()
 
 
 __all__ = ["MoonshineBackend", "ModelInfo"]
