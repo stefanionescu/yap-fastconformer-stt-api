@@ -42,7 +42,10 @@ class MoonshineBackend:
             precision=precision,
             autocast_dtype=self._autocast_dtype,
         )
-        self._processor = AutoProcessor.from_pretrained(cfg.model_id)
+        self._processor = AutoProcessor.from_pretrained(
+            cfg.model_id,
+            trust_remote_code=True,
+        )
         self._model = self._load_model(cfg, device)
         self._model.eval()
         _LOG.info("Loaded Moonshine model %s on %s (%s)", cfg.model_id, device, precision)
