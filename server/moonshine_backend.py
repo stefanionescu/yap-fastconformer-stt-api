@@ -4,6 +4,7 @@ import contextlib
 import logging
 from dataclasses import dataclass
 from typing import Iterable, Sequence
+import os
 
 import numpy as np
 import torch
@@ -43,7 +44,10 @@ class MoonshineBackend:
             precision=precision,
             autocast_dtype=self._autocast_dtype,
         )
-        self._min_samples = 512
+        # Determine a safe minimum so Moonshine’s conv stack never sees too-short inputs.
+        # Priority: env override -> on-the-fly calibration -> sane default.
+        env_min = int(os.environ.get("MIN_SAMPLES", "0") or "0")
+        self._min_samples = env_min if env_min > 0 else 0
         self._processor = AutoProcessor.from_pretrained(
             cfg.model_id,
             trust_remote_code=True,
@@ -51,9 +55,23 @@ class MoonshineBackend:
         self._model = self._load_model(cfg, device)
         self._model.eval()
         self._target_dtype = self._detect_parameter_dtype()
-        _LOG.info("Loaded Moonshine model %s on %s (%s)", cfg.model_id, device, precision)
-        if cfg.warmup_seconds > 0:
-            self._warmup(int(cfg.warmup_seconds * cfg.sample_rate))
+        if self._min_samples <= 0:
+            self._min_samples = self._calibrate_min_samples(cfg.sample_rate)
+        # Ensure warmup uses at least the safe minimum
+        warmup_n = (
+            max(int(cfg.warmup_seconds * cfg.sample_rate), self._min_samples)
+            if cfg.warmup_seconds > 0
+            else self._min_samples
+        )
+        _LOG.info(
+            "Loaded Moonshine model %s on %s (%s); calibrated min_samples=%d (%.1f ms)",
+            cfg.model_id,
+            device,
+            precision,
+            self._min_samples,
+            1000.0 * self._min_samples / 16000.0,
+        )
+        self._warmup(warmup_n)
 
     @property
     def info(self) -> ModelInfo:
@@ -120,6 +138,29 @@ class MoonshineBackend:
                 tokens = self._model.generate(**inputs, max_new_tokens=1)
             _ = self._processor.batch_decode(tokens, skip_special_tokens=True)
         _LOG.info("Warmup complete (%d samples)", samples)
+
+    def _calibrate_min_samples(self, sr: int) -> int:
+        """
+        Find the smallest waveform length (in samples) that Moonshine accepts without
+        the conv1d 'kernel > input length' runtime error. Try a quick ladder, then fall back.
+        """
+        candidates = [512, 1024, 1536, 2048, 3072, 4096, 6144, 8192]
+        for n in candidates:
+            try:
+                with torch.no_grad():
+                    audio = np.zeros((1, n), dtype=np.float32)
+                    inputs = self._processor(audio, sampling_rate=sr, return_tensors="pt", padding=True)
+                    inputs = self._to_device_dtype(inputs)
+                    with self._autocast_context():
+                        _ = self._model.generate(**inputs, max_new_tokens=1)
+                return n
+            except Exception as exc:
+                if "Kernel size" not in str(exc):
+                    # Unexpected error → stop early and use a safe default
+                    _LOG.warning("Calibration stopped early at %d samples: %s", n, exc)
+                    return 4096
+                continue
+        return 4096
 
     @property
     def min_samples(self) -> int:

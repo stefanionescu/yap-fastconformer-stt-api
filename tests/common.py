@@ -239,7 +239,12 @@ async def run_streaming_session(
     samples_sent = 0
 
     async for chunk in iter_pcm_chunks(audio_bytes, samples_per_chunk):
-        channel.send(chunk)
+        try:
+            channel.send(chunk)
+        except Exception as e:
+            # DataChannel closed while sending — surface a clean error and stop streaming.
+            set_error(RuntimeError(f"datachannel_send_failed: {e}"))
+            break
         if first_audio_sent_ts is None:
             first_audio_sent_ts = time.perf_counter()
         samples_sent += len(chunk) // 2
