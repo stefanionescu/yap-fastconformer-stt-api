@@ -395,7 +395,7 @@ class GlobalBatcher:
                             self._prev_hypotheses[slots[i]] = new_prev_hypotheses[j] if j < len(new_prev_hypotheses) else None
                     else:
                         for i in idxs:
-                            self._prev_hypotheses[slots[i]] = None
+                            self._prev_hypotheses[slots[i]] = new_prev_hypotheses
                 except Exception:
                     for i in idxs:
                         self._prev_hypotheses[slots[i]] = None
@@ -507,7 +507,7 @@ class GlobalBatcher:
                 if isinstance(new_prev_hypotheses, (list, tuple)):
                     self._prev_hypotheses[slot] = new_prev_hypotheses[0] if new_prev_hypotheses else None
                 else:
-                    self._prev_hypotheses[slot] = None
+                    self._prev_hypotheses[slot] = new_prev_hypotheses
             except Exception:
                 self._prev_hypotheses[slot] = None
 
