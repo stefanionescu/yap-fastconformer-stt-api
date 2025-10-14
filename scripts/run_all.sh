@@ -30,7 +30,19 @@ echo "Started Moonshine pipeline (pid=$PIPE_PID)"
 echo "Logs: $LOG_FILE"
 echo "PID file: $PID_FILE"
 echo "Tail command: tail -f $LOG_FILE"
-echo "Press Ctrl+C to stop tailing; the pipeline keeps running in the background." 
+echo "Press Ctrl+C to stop tailing; the pipeline keeps running in the background."
+
+# Wait for log file to appear so tail doesn't exit immediately
+timeout=30
+while [[ ! -f "$LOG_FILE" && $timeout -gt 0 ]]; do
+  sleep 1
+  timeout=$((timeout - 1))
+done
+
+if [[ ! -f "$LOG_FILE" ]]; then
+  echo "Log file $LOG_FILE not created yet. Check process $PIPE_PID manually."
+  exit 1
+fi
 
 trap 'echo "\nStopping log tail; pipeline is still running (pid=$PIPE_PID)."' INT TERM
 
