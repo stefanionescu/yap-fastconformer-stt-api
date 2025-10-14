@@ -79,7 +79,7 @@ class AsrApplication:
                                 "op": "ready",
                                 "sid": sid,
                                 "max_batch": self.cfg.max_batch_size,
-                                "model": self.cfg.model_id,
+                                "model": self.cfg.model_name,
                             }
                         )
                     )
