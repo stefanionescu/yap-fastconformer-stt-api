@@ -13,7 +13,7 @@ Moonshine-based real-time speech-to-text service with GPU batching, WebRTC data-
 - `pkg-config` (required to build PyAV for WebRTC transport)
 - `ffmpeg` (used by the sample tooling for audio resampling)
 
-Install them via your package manager, e.g. `brew install pkg-config ffmpeg` on macOS or `apt install pkg-config ffmpeg` on Debian/Ubuntu.
+Install them via your package manager, e.g. `brew install pkg-config ffmpeg` on macOS or `apt install pkg-config ffmpeg libavformat-dev libavdevice-dev libavcodec-dev libavutil-dev libswscale-dev libopus-dev libvpx-dev` on Debian/Ubuntu. The helper `scripts/install.sh` will attempt to install these automatically when run with sufficient privileges.
 
 ## Local Quickstart
 ```bash

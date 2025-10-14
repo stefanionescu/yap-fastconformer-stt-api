@@ -33,4 +33,24 @@ if [[ -d "$HOME/.cache/torch" ]]; then
   rm -rf "$HOME/.cache/torch"
 fi
 
+if [[ -d "$HOME/.cache/pip" ]]; then
+  echo "Removing pip cache"
+  rm -rf "$HOME/.cache/pip"
+fi
+
+if [[ -d "$HOME/.cache/aiohttp" ]]; then
+  echo "Removing aiohttp cache"
+  rm -rf "$HOME/.cache/aiohttp"
+fi
+
+if [[ -d "$HOME/.cache/aioice" ]]; then
+  echo "Removing aioice cache"
+  rm -rf "$HOME/.cache/aioice"
+fi
+
+if [[ -d "$HOME/.local/share/aiortc" ]]; then
+  echo "Removing aiortc runtime data"
+  rm -rf "$HOME/.local/share/aiortc"
+fi
+
 echo "Cleanup complete."

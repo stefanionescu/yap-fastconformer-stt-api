@@ -7,13 +7,40 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 TORCH_VERSION="${TORCH_VERSION:-2.4.0}"
 TORCH_CUDA="${TORCH_CUDA:-}"
 
-if ! command -v pkg-config >/dev/null 2>&1; then
-  echo "pkg-config is required to build PyAV (dependency of aiortc). Please install it (e.g., 'brew install pkg-config' or 'apt install pkg-config')." >&2
-  exit 1
-fi
-if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "ffmpeg is recommended for audio preprocessing in tests. Install it via your package manager if missing." >&2
-fi
+APT_UPDATED=0
+
+ensure_system_dep() {
+  local dep="$1"
+  local install_hint="$2"
+  if command -v "$dep" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Missing dependency '$dep'. Attempting automatic install..." >&2
+
+  if command -v apt-get >/dev/null 2>&1; then
+    if [[ ${APT_UPDATED:-0} -eq 0 ]]; then
+      apt-get update
+      APT_UPDATED=1
+    fi
+    apt-get install -y $install_hint
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y $install_hint
+  elif command -v brew >/dev/null 2>&1; then
+    brew install $install_hint
+  else
+    echo "Could not auto-install '$dep'. Please install it manually (hint: $install_hint)." >&2
+    exit 1
+  fi
+
+  if ! command -v "$dep" >/dev/null 2>&1; then
+    echo "Dependency '$dep' still missing after attempted install." >&2
+    exit 1
+  fi
+}
+
+ensure_system_dep "pkg-config" "pkg-config libavformat-dev libavdevice-dev libavcodec-dev libavutil-dev libswscale-dev libopus-dev libvpx-dev"
+ensure_system_dep "ffmpeg" "ffmpeg"
 
 if [[ ! -d "$VENV_PATH" ]]; then
   "${PYTHON_BIN}" -m venv "$VENV_PATH"
