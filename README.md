@@ -1,149 +1,133 @@
-# Moonshine Streaming ASR Server
+# Parakeet-TDT Streaming ASR Server
 
-Moonshine-based real-time speech-to-text service with GPU batching, WebRTC data-channel streaming, and Docker deployment assets. The server targets the English Moonshine Base model by default and is designed for low-latency transcription without baked-in VAD.
+Self-hosted Parakeet-TDT-0.6B-V3 streaming speech-to-text server built on the latest NeMo 2.4 toolchain. Audio arrives over a FastAPI WebSocket endpoint, partial hypotheses stream out in real time, and the final transcript flushes as soon as you emit an EOS control frame.
 
 ## Highlights
-- Real-time streaming transcription over WebRTC data channels (binary PCM16 @ 16 kHz)
-- Global batching with configurable batch size and wait time (default max batch 32)
-- Moonshine ONNX/TensorRT backend (useful-moonshine-onnx v1.0.0) tuned for low-latency inference on NVIDIA GPUs
-- Clean scripts for local setup, warmup, benchmarking, and Docker builds
-- Tests exercising streaming, warmup, and benchmarking flows
+- True RNNT streaming via NeMo’s `partial_hypothesis` interface — no fake chunking
+- Single-command installer (`./main.sh`) that runs fully detached, with all logs coalesced into `logs/latest.log`
+- Scripted orchestration for environment checks, apt packages, Python 3.12 virtualenv, CUDA 12.1 PyTorch wheels, requirements, model prefetch, and server launch
+- FastAPI + uvicorn + uvloop WebSocket server, tuned for low-latency multilingual transcription
+- CLI clients and benchmarks for smoke tests, warmup, and concurrency sizing
+- Docker build that mirrors the script flow and launches the exact same server inside a GPU-enabled container
 
-## Prerequisites
-- `pkg-config` (required to build PyAV for WebRTC transport)
-- `ffmpeg` (used by the sample tooling for audio resampling)
+## Requirements
+- Ubuntu 22.04/24.04 GPU host with NVIDIA driver + CUDA runtime already installed
+- `nvidia-smi` must work before running the setup
+- Ability to install apt packages and Python 3.12 (use `sudo` or run as root)
 
-Install them via your package manager, e.g. `brew install pkg-config ffmpeg` on macOS or `apt install pkg-config ffmpeg libavformat-dev libavdevice-dev libavcodec-dev libavutil-dev libswscale-dev libopus-dev libvpx-dev` on Debian/Ubuntu. The helper `scripts/core/install.sh` will attempt to install these automatically when run with sufficient privileges.
-
-## One-Step Quickstart
+## One-Command Quickstart (non-Docker)
 ```bash
-bash scripts/run_all.sh
+./main.sh
 ```
 
-This single command installs dependencies (or reuses the cached venv), launches the server, and tails the unified log at `logs/moonshine.log`. You can `Ctrl+C` the tail and the background service keeps running. To resume log streaming later:
+What happens:
+1. `scripts/00_env_check.sh` verifies `nvidia-smi` and notes the Python 3.12 status.
+2. `scripts/01_system_deps.sh` installs Python 3.12, `ffmpeg`, `libsndfile1`, `build-essential`, `git`, and base certificates.
+3. `scripts/02_python_env.sh` creates `.venv` and upgrades `pip`, `wheel`, `setuptools`.
+4. `scripts/03_python_deps.sh` installs CUDA 12.1 PyTorch 2.4.0 wheels and Python dependencies from `requirements.txt`.
+5. `scripts/04_prefetch_model.sh` caches `nvidia/parakeet-tdt-0.6b-v3` via `huggingface_hub`.
+6. `scripts/05_run_server.sh` activates `.venv` and execs `uvicorn server:app` on `0.0.0.0:8080`.
+
+All stdout/stderr is appended to `logs/run_<timestamp>.log` with a symlink at `logs/latest.log`. `main.sh` automatically tails the log after launching; hit `Ctrl+C` to drop the tail — the background process keeps running. Logs are still available via:
 ```bash
-tail -f logs/moonshine.log
-```
-Check the last 200 log lines without following:
-```bash
-tail -n 200 logs/moonshine.log
+tail -f logs/latest.log
 ```
 
-Utility runners for tests live under `scripts/test/` (see below), or you can use `scripts/stop.sh` to tear everything down.
-
-## Docker Quickstart
+Stop the detached pipeline (and uvicorn) with:
 ```bash
-# Build image (moonshine-asr:latest)
+./stop.sh
+```
+
+`stop.sh` kills the PID stored in `.run.pid` or falls back to `pkill -f "uvicorn server:app"`.
+
+### Tuning knobs
+Override before invoking `./main.sh` (or export globally):
+- `STEP_MS` (default `240`)
+- `RIGHT_CONTEXT_MS` (default `160`)
+- `MAX_INFLIGHT_STEPS` (default `1`)
+- `HF_HOME` (default `$(pwd)/.cache/hf`)
+
+### Scripts overview
+- `scripts/00_env_check.sh` — sanity checks for GPU + Python 3.12
+- `scripts/01_system_deps.sh` — apt dependencies (uses `sudo` if necessary)
+- `scripts/02_python_env.sh` — virtualenv bootstrap and base tooling upgrade
+- `scripts/03_python_deps.sh` — installs CUDA 12.1 PyTorch 2.4.0 stack + project requirements
+- `scripts/04_prefetch_model.py|.sh` — caches Parakeet-TDT-0.6B-V3 into `HF_HOME`
+- `scripts/05_run_server.sh` — activates `.venv` and launches `uvicorn`
+- `main.sh` — orchestrates the full chain in the background, tails logs for you
+- `stop.sh` — stops the detached pipeline and preserves logs
+
+## WebSocket Protocol
+Endpoint: `ws://<host>:8080/ws`
+
+- Stream raw PCM16 mono audio at 16 kHz in any chunk size (20 ms suggested).
+- After the final audio frame, send the control frame `b"__CTRL__:EOS"` to flush the final transcript immediately.
+- Optional reset during a session with `b"__CTRL__:RESET"`.
+- Partial responses arrive as JSON text frames: `{ "type": "partial", "text": "…" }`.
+- Final response after EOS: `{ "type": "final", "text": "…" }`.
+- Health check endpoint: `GET /status` → `200 ok`.
+
+## Clients, Warmup, and Benchmarks
+All clients assume `.venv` is active (`source .venv/bin/activate`) or you run via the provided scripts.
+
+### Smoke test
+```bash
+. .venv/bin/python tests/client.py --file mid.wav --full-text
+```
+
+### Warmup / latency probe
+```bash
+. .venv/bin/python tests/warmup.py --file mid.wav --rtf 10 --print-partials
+```
+
+### Concurrency benchmark
+```bash
+. .venv/bin/python tests/bench.py --url ws://127.0.0.1:8080/ws --file mid.wav --n 64 --concurrency 16
+```
+
+### Standalone utilities
+- `client.py` — minimal CLI client (`client.py path/to/audio.wav --url ws://…`)
+- `bench_concurrency.py` — synthetic tone generator that hammers the server with many simultaneous streams
+
+## Docker Workflow
+```bash
+# Build the image (parakeet-tdt-streaming:latest)
 bash docker/build.sh
 
-# Run with GPU passthrough on :8000
-docker run --rm -it --gpus all -p 8000:8000 moonshine-asr:latest
+# Run with GPU access, publishing port 8080
+PORT=8080 bash docker/run.sh
 ```
 
-The container exposes the `/webrtc` HTTP endpoint for SDP exchange. Use the tests from the host to validate:
+The Dockerfile mirrors the host workflow: it installs Python 3.12, creates `/app/.venv`, installs CUDA 12.1 PyTorch wheels plus requirements, and launches `scripts/05_run_server.sh` as the container entrypoint. Default env vars inside the container:
+- `STEP_MS=240`
+- `RIGHT_CONTEXT_MS=160`
+- `MAX_INFLIGHT_STEPS=1`
+- `HF_HOME=/cache/hf` (persistent model cache; mount a volume if desired)
+
+Need to preseed the Hugging Face cache or reuse GPUs across runs? Mount a host directory:
 ```bash
-python tests/warmup.py --server 127.0.0.1:8000 --file mid.wav --rtf 10 --full-text
-python tests/bench.py   --server 127.0.0.1:8000 --file mid.wav --rtf 1.0 --n 20 --concurrency 5
+docker run --rm -it --gpus all \
+  -p 8080:8080 \
+  -v /path/to/hf-cache:/cache/hf \
+  parakeet-tdt-streaming:latest
 ```
 
-## WebRTC Protocol
-1. **Offer/Answer** — POST SDP offer to `http://<host>:<port>/webrtc` (JSON body: `{ "sdp": ..., "type": ... }`). Server replies with an SDP answer.
-2. **Data channel** — Client creates a data channel (label is ignored). After channel opens:
-   - Client sends `{"op":"init","sid":"<uuid>","sr":16000}`.
-   - Server replies `{"op":"ready","sid":...,"max_batch":...}`.
-   - Client streams binary PCM16 mono audio frames (20 ms chunks recommended).
-   - Client signals end with `{"op":"close"}`.
-   - Server emits `{"op":"interim",...}` updates and a final `{"op":"final","final":true,...}` payload.
-
-If an error occurs the server sends `{"op":"error","reason":"..."}` and closes the data channel.
-
-## Configuration (environment variables)
-- `ASR_HOST` (default `0.0.0.0`)
-- `ASR_PORT` (default `8000`)
-- `ASR_WEBRTC_PATH` (default `/webrtc`)
-- `MOONSHINE_MODEL` (Moonshine ONNX alias, default `moonshine/base`)
-- `MOONSHINE_ONNX_PROVIDERS` (comma-separated ONNX Runtime EP list, e.g. `TensorrtExecutionProvider,CUDAExecutionProvider,CPUExecutionProvider`)
-- `MOONSHINE_TRT_ENGINE_DIR` (optional path containing pre-built TensorRT engines)
-- `MOONSHINE_ONNX_PROVIDER_OPTIONS` (advanced key/value overrides per provider)
-- `MAX_BATCH_SIZE` (default `32`)
-- `MAX_BATCH_WAIT_MS` (default `10`)
-- `MAX_BUFFER_SECONDS` (default `90`)
-- `MODEL_WARMUP_SECONDS` (default `1.5`)
-- `MIN_SAMPLES` (optional minimum waveform length override)
-
-### ONNX / TensorRT runtime
-
-The server always runs through the [useful-moonshine-onnx](https://github.com/moonshine-ai/moonshine/tree/main/moonshine-onnx) stack (v1.0.0). Installation is handled automatically by `scripts/core/install.sh`, but if you need to install manually:
-
-```bash
-# Example install (GPU build with TensorRT + CUDA execution providers).
-pip install onnxruntime-gpu==1.18.1
-pip install "useful-moonshine-onnx@git+https://github.com/moonshine-ai/moonshine.git#subdirectory=moonshine-onnx"
+## Requirements File (Python)
 ```
-
-`onnxruntime-gpu` bundles CUDA and TensorRT execution providers. Ensure the version you pin matches the driver/toolkit stack on your deployment hosts.
-
-Key knobs:
-- `MOONSHINE_MODEL` — alias used by `MoonshineOnnxModel` (e.g. `moonshine/base`, `moonshine/tiny`).
-- `MOONSHINE_ONNX_PROVIDERS` — preferred execution providers, e.g. `TensorrtExecutionProvider,CUDAExecutionProvider,CPUExecutionProvider`.
-- `MOONSHINE_TRT_ENGINE_DIR` — directory holding TensorRT engine binaries if you have pre-built artifacts.
-- `MOONSHINE_ONNX_PROVIDER_OPTIONS` — comma separated `PROVIDER=key:value;key2:value2` overrides passed to ONNX Runtime.
-
-When TensorRT is first selected the ONNX runtime may need to build an engine; cache directories can be pointed at via `MOONSHINE_TRT_ENGINE_DIR` to avoid warm starts. The batching layer, VAD workflow, and WebRTC contract remain unchanged across provider mixes.
-
-## Scripts
-- `scripts/run_all.sh` — fire-and-forget install→launch pipeline with live log tail
-- `scripts/install_and_start.sh` — helper invoked by `run_all.sh` (install + launch) — typically not called directly
-- `scripts/core/install.sh` — bootstrap virtualenv + install dependencies
-- `scripts/core/start.sh` — start the ASR server using the active venv
-- `scripts/stop.sh` — stop the server, drop caches, remove the local venv, and uninstall any system packages `scripts/core/install.sh` added
-- `scripts/test/warmup.sh` — run warmup/latency probe against a server
-- `scripts/test/client.sh` — simple CLI client for manual testing
-- `scripts/test/bench.sh` — concurrency benchmark harness
-
-Each script honours `VENV_PATH` if you want to reuse a custom environment.
-
-## Tests & Benchmarks
-- `scripts/test/warmup.sh` — single streaming session health check (local GPU)
-- `scripts/test/client.sh` — simple CLI client for quick manual trials (local GPU)
-- `scripts/test/bench.sh` — concurrency benchmark harness (local GPU)
-- `tests/client.py` — advanced client for local or RunPod endpoints
-
-Example usage (assumes the server is running):
-```bash
-# Local GPU smoke test
-bash scripts/test/warmup.sh --file mid.wav --rtf 10 --full-text
-
-# Local GPU benchmark
-bash scripts/test/bench.sh --file mid.wav --rtf 1.0 --n 20 --concurrency 4
-
-# Remote RunPod call using profile defaults
-python tests/client.py --print-partials
-
-# Override with explicit HTTPS endpoint
-python tests/client.py --https-url https://your-runpod-endpoint/webrtc --api-key "$RUNPOD_API_KEY" --file mid.wav
+nemo_toolkit[asr]==2.4.0
+fastapi, uvicorn[standard], uvloop, websockets, soundfile, pydub
+huggingface_hub[hf-xet], hf_transfer, numpy<2
 ```
-> **Note:** The helper scripts under `scripts/test/` automatically activate `.venv`. If you invoke the Python modules directly (e.g. `python tests/client.py`) make sure the virtual environment created by `scripts/core/install.sh` is activated first (`source .venv/bin/activate`).
+PyTorch (torch/torchvision/torchaudio 2.4.0) is installed separately via `scripts/03_python_deps.sh` to ensure the CUDA 12.1 wheels are pulled from the official index.
 
-### RunPod environment file
-Create a simple `.env` file alongside the repo (or point `--env-file` elsewhere):
-```
-# .env (default path: repo_root/.env)
-RUNPOD_API_KEY=your_runpod_api_key
-RUNPOD_HTTPS_URL=https://your-endpoint.example.com/webrtc
-# Or specify raw TCP instead:
-# RUNPOD_TCP_HOST=1.2.3.4
-# RUNPOD_TCP_PORT=8000
-# Optional custom path
-# RUNPOD_WEBRTC_PATH=/custom/path
-```
-Values in `.env` are automatically loaded but can be overridden via CLI flags or environment variables (`RUNPOD_API_KEY`, `RUNPOD_HTTPS_URL`, etc.).
+## Notes
+- The first `./main.sh` run downloads ~2.5 GB of model weights. Subsequent runs reuse `HF_HOME`.
+- The server loads the NeMo checkpoint on import, so expect ~20 s of initialisation on cold GPU nodes.
+- Set `HF_HUB_ENABLE_HF_TRANSFER=1` to accelerate model downloads via the Rust binary.
+- Use `MAX_INFLIGHT_STEPS>1` when the GPU has headroom to parallelise RNNT calls.
 
-All scripts/tests stream 16 kHz PCM16 mono audio from files under `` by default.
-
-## Docker Assets
-- `docker/Dockerfile` — CUDA 12.1 runtime base preconfigured for ONNX Runtime GPU execution
-- `docker/build.sh` — helper to build `moonshine-asr` image
-- `docker/run.sh` — helper to run the container with GPU access
-
-Override `MOONSHINE_MODEL`, `MOONSHINE_ONNX_PROVIDERS`, or `MAX_BATCH_SIZE` via `docker run -e ...`.
+## Troubleshooting
+- `ERROR: nvidia-smi not found` → install the proprietary NVIDIA driver + CUDA toolkit runtime first.
+- `python3.12: command not found` → rerun `./main.sh` as a user with sudo privileges so apt can install Python 3.12.
+- Hugging Face download stalls → ensure outbound HTTPS is allowed or pre-populate the cache and export `HF_HOME`.
+- To reset everything, delete `.venv`, `.cache/hf`, `logs/*`, and rerun `./main.sh`.

@@ -1,36 +1,43 @@
-FROM nvidia/cuda:12.1.1-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    OMP_NUM_THREADS=1 \
-    MKL_NUM_THREADS=1
+    HF_HOME=/cache/hf \
+    TRANSFORMERS_OFFLINE=0 \
+    HF_HUB_ENABLE_HF_TRANSFER=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 python3.10-dev python3-pip python3-setuptools python3-wheel \
-    ffmpeg git curl ca-certificates build-essential pkg-config \
-    libopus0 libvpx7 libsrtp2-1 libavformat58 libavcodec58 libavdevice58 libffi-dev libssl-dev \
+    python3.12 python3.12-venv python3-pip \
+    ffmpeg libsndfile1 git ca-certificates build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
-RUN python -m pip install --upgrade pip wheel
+RUN mkdir -p /cache/hf
 
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN python -m pip install --no-cache-dir -r /app/requirements.txt
+COPY scripts /app/scripts
+RUN chmod +x /app/scripts/*.sh
 
-COPY server /app/server
+RUN python3.12 -m venv /app/.venv \
+    && . /app/.venv/bin/activate \
+    && python -m pip install -U pip wheel setuptools \
+    && pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+    && pip install -r /app/requirements.txt
+
+COPY server.py /app/server.py
+COPY client.py /app/client.py
+COPY bench_concurrency.py /app/bench_concurrency.py
 COPY tests /app/tests
 COPY samples /app/samples
-COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-ENV ASR_HOST=0.0.0.0 \
-    ASR_PORT=8000 \
-    ASR_WEBRTC_PATH=/webrtc \
-    MOONSHINE_MODEL=moonshine/base \
-    MOONSHINE_ONNX_PROVIDERS=TensorrtExecutionProvider,CUDAExecutionProvider,CPUExecutionProvider
+ENV STEP_MS=240 \
+    RIGHT_CONTEXT_MS=160 \
+    MAX_INFLIGHT_STEPS=1 \
+    PATH="/app/.venv/bin:${PATH}"
 
-EXPOSE 8000
-ENTRYPOINT ["/entrypoint.sh"]
+EXPOSE 8080
+ENTRYPOINT ["/app/entrypoint.sh"]
