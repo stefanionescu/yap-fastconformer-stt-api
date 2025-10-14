@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Warmup and quick health check for FastConformer ASR server (WebSocket).
+Warmup and quick health check for Moonshine ASR server over WebRTC.
 
 Designed to be copied into Docker image and run inside the container.
 """
 from __future__ import annotations
+
 import argparse
 import asyncio
 import os
-from pathlib import Path
 
 from common import (
     run_streaming_session,
@@ -19,11 +19,12 @@ from common import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Warmup via WebSocket streaming")
+    parser = argparse.ArgumentParser(description="Warmup via WebRTC streaming")
     default_host = os.getenv("ASR_HOST", "127.0.0.1")
     default_port = os.getenv("ASR_PORT", "8000")
     default_server = f"{default_host}:{default_port}"
-    parser.add_argument("--server", type=str, default=default_server, help="host:port or ws://host:port")
+    parser.add_argument("--server", type=str, default=default_server, help="host:port or full http(s) URL")
+    parser.add_argument("--path", default=os.getenv("ASR_WEBRTC_PATH", "/webrtc"), help="Offer endpoint path")
     parser.add_argument("--secure", action="store_true")
     parser.add_argument("--file", type=str, default="mid.wav", help="Audio file (absolute path or under samples/)")
     parser.add_argument("--rtf", type=float, default=10.0, help="Real-time factor (1.0-10.0; 10=faster)")
@@ -49,6 +50,7 @@ async def run_once(args: argparse.Namespace) -> int:
         tail_linger_ms=150,
         secure=args.secure,
         print_partials=args.debug,
+        offer_path=args.path,
     )
 
     text = str(res.get("text", ""))
@@ -63,7 +65,7 @@ async def run_once(args: argparse.Namespace) -> int:
     print(f"RTF(measured): {rtf_measured:.4f}  xRT: {(1.0/rtf_measured) if rtf_measured>0 else 0.0:.2f}x  (target={args.rtf})")
     ttfw = res.get("ttfw_s")
     if ttfw is not None:
-        print(f"TTFW: {float(ttfw)*1000.0:.1f}ms")
+        print(f"TTFW: {float(ttfw) * 1000.0:.1f}ms")
     print(f"Partials: {int(res.get('partials', 0))}")
     print(f"Δ(audio): {float(res.get('delta_to_audio_ms', 0.0)):.1f}ms")
     print(f"Flush→Final: {float(res.get('finalize_ms', 0.0)):.1f}ms")
@@ -77,5 +79,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

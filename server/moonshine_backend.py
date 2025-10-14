@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Iterable, Sequence
+
+import numpy as np
+import torch
+from transformers import AutoProcessor, MoonshineForConditionalGeneration
+
+try:  # Optional dependency for int8 loading
+    from transformers import BitsAndBytesConfig  # type: ignore
+except ImportError:  # pragma: no cover - optional
+    BitsAndBytesConfig = None  # type: ignore[misc,assignment]
+
+from .config import Config
+
+_LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    model_id: str
+    device: torch.device
+    precision: str
+    autocast_dtype: torch.dtype | None
+
+
+class MoonshineBackend:
+    def __init__(self, cfg: Config) -> None:
+        device = self._resolve_device(cfg)
+        precision = cfg.precision
+        self._autocast_dtype = self._resolve_autocast_dtype(cfg)
+        self._info = ModelInfo(
+            model_id=cfg.model_id,
+            device=device,
+            precision=precision,
+            autocast_dtype=self._autocast_dtype,
+        )
+        self._processor = AutoProcessor.from_pretrained(cfg.model_id)
+        self._model = self._load_model(cfg, device)
+        self._model.eval()
+        _LOG.info("Loaded Moonshine model %s on %s (%s)", cfg.model_id, device, precision)
+        if cfg.warmup_seconds > 0:
+            self._warmup(int(cfg.warmup_seconds * cfg.sample_rate))
+
+    @property
+    def info(self) -> ModelInfo:
+        return self._info
+
+    def _resolve_device(self, cfg: Config) -> torch.device:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():  # pragma: no cover - mac fallback
+            return torch.device("mps")
+        if not cfg.allow_cpu_fallback:
+            raise RuntimeError("No GPU found and CPU fallback disabled")
+        return torch.device("cpu")
+
+    def _resolve_autocast_dtype(self, cfg: Config) -> torch.dtype | None:
+        if cfg.precision == "fp16":
+            return torch.float16
+        if cfg.precision == "bf16":
+            return torch.bfloat16
+        return None
+
+    def _load_model(self, cfg: Config, device: torch.device) -> MoonshineForConditionalGeneration:
+        precision = cfg.precision
+        kwargs = {"trust_remote_code": True}
+        quant_config = None
+        if precision == "int8":
+            if BitsAndBytesConfig is None:
+                raise RuntimeError(
+                    "bitsandbytes is required for int8 loading but is not available"
+                )
+            quant_config = BitsAndBytesConfig(load_in_8bit=True)
+            kwargs.update(
+                {
+                    "device_map": "auto",
+                    "quantization_config": quant_config,
+                }
+            )
+        else:
+            torch_dtype = {
+                "fp16": torch.float16,
+                "bf16": torch.bfloat16,
+                "fp32": torch.float32,
+            }.get(precision, torch.float16)
+            kwargs.update({"torch_dtype": torch_dtype})
+        model = MoonshineForConditionalGeneration.from_pretrained(cfg.model_id, **kwargs)
+        if precision != "int8":
+            model.to(device)
+        return model
+
+    def _warmup(self, samples: int) -> None:
+        samples = max(samples, 1)
+        audio = np.zeros((1, samples), dtype=np.float32)
+        with torch.no_grad():
+            inputs = self._processor(audio, sampling_rate=16000, return_tensors="pt", padding=True)
+            for key, value in inputs.items():
+                if isinstance(value, torch.Tensor):
+                    inputs[key] = value.to(self._info.device)
+            tokens = self._model.generate(**inputs, max_new_tokens=1)
+            _ = self._processor.batch_decode(tokens, skip_special_tokens=True)
+        _LOG.info("Warmup complete (%d samples)", samples)
+
+    @staticmethod
+    def _prepare_batch(audios: Sequence[np.ndarray]) -> list[np.ndarray]:
+        cleaned: list[np.ndarray] = []
+        for idx, audio in enumerate(audios):
+            if audio.size == 0:
+                cleaned.append(np.zeros(1, dtype=np.float32))
+                continue
+            arr = np.asarray(audio, dtype=np.float32)
+            if arr.ndim != 1:
+                arr = arr.reshape(-1)
+            cleaned.append(arr)
+        return cleaned
+
+    def transcribe(self, audios: Sequence[np.ndarray]) -> list[str]:
+        if not audios:
+            return []
+        batch = self._prepare_batch(audios)
+        with torch.no_grad():
+            inputs = self._processor(batch, sampling_rate=16000, return_tensors="pt", padding=True)
+            for key, value in list(inputs.items()):
+                if isinstance(value, torch.Tensor):
+                    inputs[key] = value.to(self._info.device)
+            autocast_dtype = self._info.autocast_dtype
+            autocast_enabled = autocast_dtype is not None and self._info.device.type in {"cuda", "mps"}
+            context = torch.autocast(
+                self._info.device.type,
+                dtype=autocast_dtype if autocast_dtype is not None else torch.float32,
+                enabled=autocast_enabled,
+            )
+            with context:
+                tokens = self._model.generate(**inputs)
+            texts = self._processor.batch_decode(tokens, skip_special_tokens=True)
+        return [t.strip() for t in texts]
+
+
+__all__ = ["MoonshineBackend", "ModelInfo"]

@@ -1,140 +1,187 @@
+from __future__ import annotations
+
 import asyncio
 import json
-from typing import Dict
+import logging
+import signal
+import uuid
+from typing import Dict, Optional
 
-import torch
-import websockets
+from aiohttp import web
+from aiortc import RTCPeerConnection, RTCSessionDescription
 
-from nemo_loader import load_fastconformer
-from batcher import GlobalBatcher
-from config import (
-    DEFAULT_HOST,
-    DEFAULT_PORT,
-    DEFAULT_MODEL_NAME,
-    DEFAULT_ATT_CONTEXT,
-    DEFAULT_DECODER,
-    DEFAULT_DEVICE,
-    DEFAULT_STEP_MS,
-    DEFAULT_MAX_BATCH,
-    DEFAULT_ASR_DEBUG
-)
-import os
+from .batching import BatchTranscriber
+from .config import Config, load_config
+from .logging_utils import setup_logging
+from .moonshine_backend import MoonshineBackend
+from .session import Session
+
+_LOG = logging.getLogger(__name__)
 
 
-HOST = os.environ.get("ASR_HOST", DEFAULT_HOST)
-PORT = int(os.environ.get("ASR_PORT", str(DEFAULT_PORT)))
-MODEL_NAME = os.environ.get("ASR_MODEL", DEFAULT_MODEL_NAME)
-ATT_CTX_RAW = os.environ.get("ASR_ATT_CTX", f"{DEFAULT_ATT_CONTEXT[0]},{DEFAULT_ATT_CONTEXT[1]}")
-try:
-    ATT_CONTEXT = tuple(int(x) for x in ATT_CTX_RAW.split(","))
-    if len(ATT_CONTEXT) != 2:
-        ATT_CONTEXT = DEFAULT_ATT_CONTEXT
-except Exception:
-    ATT_CONTEXT = DEFAULT_ATT_CONTEXT
-DECODER = os.environ.get("ASR_DECODER", DEFAULT_DECODER)
-DEVICE = os.environ.get("ASR_DEVICE", DEFAULT_DEVICE)
-STEP_MS = int(os.environ.get("ASR_STEP_MS", str(DEFAULT_STEP_MS)))
-MAX_BATCH = int(os.environ.get("ASR_MAX_BATCH", str(DEFAULT_MAX_BATCH)))
-VERBOSE = os.environ.get("ASR_DEBUG", str(DEFAULT_ASR_DEBUG)).lower() in {"1", "true", "yes", "debug"}
+class AsrApplication:
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+        self.backend = MoonshineBackend(cfg)
+        self.batcher = BatchTranscriber(self.backend, cfg)
+        self._pcs: set[RTCPeerConnection] = set()
 
-CLIENTS: Dict[str, websockets.WebSocketServerProtocol] = {}
-BATCHER: GlobalBatcher
-
-
-async def fanout_loop(batcher: GlobalBatcher):
-    while True:
-        sid, text, ts = await batcher.results.get()
-        ws = CLIENTS.get(sid)
-        if ws is None:
-            continue
-        msg = {"op": "interim", "sid": sid, "text": text, "final": False, "ts": ts}
+    async def handle_offer(self, request: web.Request) -> web.Response:
         try:
-            await ws.send(json.dumps(msg))
+            payload = await request.json()
         except Exception:
-            pass
+            return web.Response(status=400, text="invalid json")
+        offer_sdp = payload.get("sdp")
+        offer_type = payload.get("type")
+        if not offer_sdp or not offer_type:
+            return web.Response(status=400, text="missing sdp/type")
+        offer = RTCSessionDescription(sdp=offer_sdp, type=offer_type)
+        pc = RTCPeerConnection()
+        self._pcs.add(pc)
+        _LOG.info("New peer connection (%s)", pc)
 
+        session_holder: Dict[str, Optional[Session]] = {"session": None}
 
-async def handler(websocket):
-    init = await websocket.recv()
-    try:
-        init_msg = json.loads(init)
-        assert init_msg.get("op") == "init"
-        sid = init_msg["sid"]
-        sr = int(init_msg.get("sr", 16000))
-    except Exception:
-        await websocket.close(code=1002, reason="Bad init")
-        return
+        def finalize_pc() -> None:
+            if session_holder["session"] is None:
+                return
+            asyncio.create_task(self._finalize_peer(pc))
 
-    CLIENTS[sid] = websocket
-    await BATCHER.add_stream(sid, sr)
+        @pc.on("datachannel")
+        def on_datachannel(channel) -> None:
+            _LOG.info("Data channel %s received", channel.label)
 
-    try:
-        async for message in websocket:
-            if isinstance(message, bytes):
-                await BATCHER.push_audio(sid, message)
-            else:
+            @channel.on("open")
+            def on_open() -> None:
+                _LOG.info("Channel %s open", channel.label)
+
+            async def process_json(message: str) -> None:
                 try:
-                    msg = json.loads(message)
-                    if msg.get("op") == "close":
-                        # Flush tail frames once before closing the stream
-                        try:
-                            await BATCHER.flush_stream(sid)
-                        except Exception:
-                            pass
-                        break
-                except Exception:
-                    pass
-    finally:
-        CLIENTS.pop(sid, None)
-        await BATCHER.remove_stream(sid)
+                    data = json.loads(message)
+                except json.JSONDecodeError:
+                    channel.send(json.dumps({"op": "error", "reason": "bad_json"}))
+                    return
+                op = str(data.get("op") or "").lower()
+                if op == "init":
+                    if session_holder["session"] is not None:
+                        channel.send(json.dumps({"op": "error", "reason": "already_initialized"}))
+                        return
+                    sr = int(data.get("sr") or self.cfg.sample_rate)
+                    if sr != self.cfg.sample_rate:
+                        channel.send(json.dumps({"op": "error", "reason": "unsupported_sample_rate"}))
+                        return
+                    sid = str(data.get("sid") or uuid.uuid4().hex)
+                    session = Session(sid, channel, self.batcher, self.cfg, on_finalized=finalize_pc)
+                    session_holder["session"] = session
+                    channel.send(
+                        json.dumps(
+                            {
+                                "op": "ready",
+                                "sid": sid,
+                                "max_batch": self.cfg.max_batch_size,
+                                "model": self.cfg.model_id,
+                            }
+                        )
+                    )
+                elif op in {"close", "flush"}:
+                    session = session_holder.get("session")
+                    if session is not None:
+                        await session.request_final()
+                elif op == "ping":
+                    channel.send(json.dumps({"op": "pong"}))
+                else:
+                    channel.send(json.dumps({"op": "error", "reason": "unknown_op"}))
+
+            async def process_binary(message: bytes) -> None:
+                session = session_holder.get("session")
+                if session is None:
+                    channel.send(json.dumps({"op": "error", "reason": "not_initialized"}))
+                    return
+                await session.add_audio(message)
+
+            def on_message(message) -> None:
+                if isinstance(message, bytes):
+                    asyncio.create_task(process_binary(message))
+                else:
+                    asyncio.create_task(process_json(str(message)))
+
+            @channel.on("message")
+            def _on_message(message) -> None:
+                on_message(message)
+
+            @channel.on("close")
+            def _on_close() -> None:
+                _LOG.info("Channel %s closed", channel.label)
+                session = session_holder.get("session")
+                if session is not None and not session.closed:
+                    asyncio.create_task(session.request_final())
+
+        @pc.on("connectionstatechange")
+        async def on_state_change() -> None:
+            _LOG.info("Peer %s state=%s", pc, pc.connectionState)
+            if pc.connectionState in {"failed", "closed"}:
+                await self._finalize_peer(pc)
+
+        await pc.setRemoteDescription(offer)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        return web.json_response({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
+
+    async def _finalize_peer(self, pc: RTCPeerConnection) -> None:
+        if pc not in self._pcs:
+            return
+        self._pcs.discard(pc)
         try:
-            await websocket.close()
-        except Exception:
-            pass
+            await pc.close()
+        except Exception:  # pragma: no cover - best effort
+            _LOG.exception("Failed to close peer %s", pc)
+
+    async def shutdown(self) -> None:
+        for pc in list(self._pcs):
+            await self._finalize_peer(pc)
+        await self.batcher.close()
 
 
-async def main():
-    global BATCHER
+async def _run_app(cfg: Config) -> None:
+    app_state = AsrApplication(cfg)
+    app = web.Application()
+    app.router.add_post(cfg.http_offer_path, app_state.handle_offer)
 
-    model = load_fastconformer(
-        model_name=MODEL_NAME,
-        att_context_size=ATT_CONTEXT,
-        decoder_type=DECODER,
-        device=DEVICE,
-    )
-    # Log effective inference configuration (note: NeMo may print train/val/test configs from the checkpoint; those do not affect inference)
-    print(
-        f"[server] Config: model={MODEL_NAME} device={DEVICE} step_ms={STEP_MS} max_slots={MAX_BATCH} verbose={VERBOSE}"
-    )
-    # Helpful one-time log of streaming configuration
+    async def on_cleanup(_: web.Application) -> None:
+        await app_state.shutdown()
+
+    app.on_cleanup.append(on_cleanup)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, cfg.host, cfg.port)
+    await site.start()
+    _LOG.info("ASR server listening on %s:%d (path=%s)", cfg.host, cfg.port, cfg.http_offer_path)
+
+    stop_event = asyncio.Event()
+
+    def _handle_signal() -> None:
+        _LOG.info("Received stop signal")
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _handle_signal)
+        except NotImplementedError:  # pragma: no cover (Windows)
+            signal.signal(sig, lambda *_: _handle_signal())
+
+    await stop_event.wait()
+    await runner.cleanup()
+
+
+def main() -> None:
+    cfg = load_config()
+    setup_logging(cfg.log_level)
     try:
-        scfg = model.encoder.streaming_cfg
-        print(
-            "[server] streaming_cfg: "
-            f"att_context={getattr(model.encoder, 'att_context_size', None)} "
-            f"pre_encode_cache={getattr(scfg, 'pre_encode_cache_size', None)} "
-            f"drop_extra_pre_encoded={getattr(scfg, 'drop_extra_pre_encoded', None)}"
-        )
-    except Exception:
+        asyncio.run(_run_app(cfg))
+    except KeyboardInterrupt:  # pragma: no cover
         pass
-    BATCHER = GlobalBatcher(
-        model=model,
-        step_ms=STEP_MS,
-        sample_rate=16000,
-        max_slots=MAX_BATCH,
-        device=torch.device(DEVICE),
-        verbose=VERBOSE,
-    )
-    await BATCHER.start()
-    asyncio.create_task(fanout_loop(BATCHER))
-
-    async with websockets.serve(
-        handler, HOST, PORT, max_size=2**22, ping_timeout=30, ping_interval=20
-    ):
-        print(f"ASR WS server listening on ws://{HOST}:{PORT}")
-        await asyncio.Future()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
+    main()

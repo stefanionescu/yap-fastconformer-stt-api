@@ -1,133 +1,91 @@
-# Yap FastConformer Streaming ASR Server
+# Moonshine Streaming ASR Server
 
-Production-ready streaming ASR server using NVIDIA NeMo FastConformer Hybrid Large with cache-aware streaming.
+Moonshine-based real-time speech-to-text service with GPU batching, WebRTC data-channel streaming, and Docker deployment assets. The server targets the English Moonshine Base model by default and is designed for low-latency transcription without baked-in VAD.
 
-**Key Features:**
-- Real-time streaming transcription with interim results
-- Global batching for high concurrency (64+ streams)
-- WebSocket protocol, VAD-agnostic
-- Docker + script deployment options
+## Highlights
+- Real-time streaming transcription over WebRTC data channels (binary PCM16 @ 16 kHz)
+- Global batching with configurable batch size and wait time (default max batch 32)
+- Moonshine Transformer backend with fp16, bf16, fp32, or int8 execution modes
+- Clean scripts for local setup, warmup, benchmarking, and Docker builds
+- Tests exercising streaming, warmup, and benchmarking flows
 
-### Quickstart (Docker)
-
-1) Build the image
-
+## Local Quickstart
 ```bash
+# 1) Create a virtual environment + install deps (CPU torch by default)
+bash scripts/install.sh
+
+# 2) Launch the server (defaults to 0.0.0.0:8000)
+bash scripts/start.sh
+
+# 3) Run a warmup / health check
+bash scripts/warmup.sh --file mid.wav --rtf 10 --full-text
+
+# 4) Try streaming from the sample client
+bash scripts/client.sh --file mid.wav --rtf 1 --full-text
+```
+
+### GPU wheel override
+Set `TORCH_CUDA` before running `scripts/install.sh` to install a specific CUDA wheel, e.g.:
+```bash
+TORCH_CUDA=cu121 TORCH_VERSION=2.4.0 bash scripts/install.sh
+```
+
+## Docker Quickstart
+```bash
+# Build image (moonshine-asr:latest)
 bash docker/build.sh
+
+# Run with GPU passthrough on :8000
+docker run --rm -it --gpus all -p 8000:8000 moonshine-asr:latest
 ```
 
-2) Run with GPUs
-
-```bash
-bash docker/run.sh
-```
-
-The server listens on `ws://localhost:8000`.
-
-3) Run Tests
-
+The container exposes the `/webrtc` HTTP endpoint for SDP exchange. Use the tests from the host to validate:
 ```bash
 python tests/warmup.py --server 127.0.0.1:8000 --file mid.wav --rtf 10 --full-text
 python tests/bench.py   --server 127.0.0.1:8000 --file mid.wav --rtf 1.0 --n 20 --concurrency 5
 ```
 
-Note: When running these inside the container, first activate the virtualenv or use the wrapper:
+## WebRTC Protocol
+1. **Offer/Answer** — POST SDP offer to `http://<host>:<port>/webrtc` (JSON body: `{ "sdp": ..., "type": ... }`). Server replies with an SDP answer.
+2. **Data channel** — Client creates a data channel (label is ignored). After channel opens:
+   - Client sends `{"op":"init","sid":"<uuid>","sr":16000}`.
+   - Server replies `{"op":"ready","sid":...,"max_batch":...}`.
+   - Client streams binary PCM16 mono audio frames (20 ms chunks recommended).
+   - Client signals end with `{"op":"close"}`.
+   - Server emits `{"op":"interim",...}` updates and a final `{"op":"final","final":true,...}` payload.
 
-```bash
-source .venv/bin/activate
-# or
-bash scripts/run/warmup.sh mid.wav 10
-```
+If an error occurs the server sends `{"op":"error","reason":"..."}` and closes the data channel.
 
-### WebSocket Protocol
-
-- Client → Server
-  - Init: `{"op":"init","sid":"<session_id>","sr":16000}`
-  - Audio frames: binary PCM16LE mono at 16 kHz in 20 ms chunks (640 samples → 1280 bytes)
-  - Close: `{"op":"close","sid":"<session_id>"}`
-
-- Server → Client
-  - Interim hyp each tick: `{"op":"interim","sid":"<session_id>","text":"...","final":false,"ts":<unix_ms>}`
-
-Notes:
-- No built-in VAD; external EoS/turn-taking is recommended (e.g., Pipecat Smart-Turn). Stop sending audio to end a turn.
-
-### Configuration (env vars)
-
+## Configuration (environment variables)
 - `ASR_HOST` (default `0.0.0.0`)
-- `ASR_PORT` (default `8080`)
-- `ASR_MODEL` (default `nvidia/stt_en_fastconformer_hybrid_large_streaming_multi`)
-- `ASR_ATT_CTX` (default `70,1`) — look-ahead; supported: `70,0` (0 ms), `70,1` (80 ms), `70,16` (480 ms), `70,33` (1040 ms)
-- `ASR_DECODER` (default `rnnt`) — `rnnt` or `ctc`
-- `ASR_DEVICE` (default `cuda:0`)
-- `ASR_STEP_MS` (default `20`) — batcher tick period (ms)
-- `ASR_MAX_BATCH` (default `64`) — max concurrent streams per tick
+- `ASR_PORT` (default `8000`)
+- `ASR_WEBRTC_PATH` (default `/webrtc`)
+- `MOONSHINE_MODEL_ID` (default `UsefulSensors/moonshine-base`)
+- `MOONSHINE_PRECISION` (`fp16`, `bf16`, `fp32`, `int8`; default `fp16`)
+- `MAX_BATCH_SIZE` (default `32`)
+- `MAX_BATCH_WAIT_MS` (default `10`)
+- `MAX_BUFFER_SECONDS` (default `120`)
+- `MODEL_WARMUP_SECONDS` (default `1.5`)
 
-Example override:
+## Scripts
+- `scripts/install.sh` — bootstrap virtualenv + install dependencies
+- `scripts/start.sh` — start the ASR server using the active venv
+- `scripts/warmup.sh` — run warmup/latency probe against a server
+- `scripts/client.sh` — simple CLI client for manual testing
+- `scripts/bench.sh` — concurrency benchmark harness
 
-```bash
-docker run --rm -it --gpus all -p 8080:8080 \
-  -e ASR_ATT_CTX=70,0 -e ASR_MAX_BATCH=96 \
-  fastconf-streaming:latest
-```
+Each script honours `VENV_PATH` if you want to reuse a custom environment.
 
-## Script Deployment
+## Tests & Benchmarks
+- `tests/warmup.py` — single streaming session health check
+- `tests/client.py` — manual client for experimentation
+- `tests/bench.py` — runs multiple concurrent sessions and summarizes latency stats
 
-1) Set up Hugging Face token:
-```bash
-export HF_TOKEN=your_token_here
-# Get token from: https://huggingface.co/settings/tokens
-```
+All scripts/tests stream 16 kHz PCM16 mono audio from files under `samples/` by default.
 
-2) Deploy server:
-```bash
-# Deploy server (creates venv, installs deps, starts in background):
-bash scripts/deploy.sh
+## Docker Assets
+- `docker/Dockerfile` — CUDA 12.1 runtime base with torch 2.4.0+cu121
+- `docker/build.sh` — helper to build `moonshine-asr` image
+- `docker/run.sh` — helper to run the container with GPU access
 
-# Deploy + auto warmup test:
-bash scripts/deploy.sh --warmup
-
-# Follow logs (if you exited deploy):
-tail -f logs/asr_server.log
-
-# Manual warmup/test:
-bash scripts/run/warmup.sh mid.wav 10
-python tests/bench.py --server 127.0.0.1:8000 --file samples/mid.wav --rtf 1.0 --n 10 --concurrency 3
-
-# Stop server + cleanup:
-bash scripts/stop.sh
-```
-
-If you run Python directly inside the repo, activate the venv first:
-
-```bash
-source .venv/bin/activate
-```
-
-## Configuration
-
-Edit `scripts/deps/env.sh` or set environment variables:
-- `ASR_HOST` (default: 0.0.0.0)
-- `ASR_PORT` (default: 8000)  
-- `ASR_MAX_BATCH` (default: 64)
-- `ASR_ATT_CTX` (default: 70,1)
-- `ASR_DEVICE` (default: cuda:0)
-
-### Performance tuning
-
-- Batching: Increase `ASR_MAX_BATCH` until GPU saturates (monitor step latency and queueing).
-- Look-ahead: `ASR_ATT_CTX=70,1` is a good default (80 ms worst, ~40 ms avg). `70,0` can reduce latency further with some WER cost.
-- Tick period: `ASR_STEP_MS=20` (50 Hz) balances server overhead and responsiveness. 10 ms is possible at higher CPU/GPU overhead.
-- Scale out: Run multiple containers and sticky-route sessions; one GPU per process is simplest.
-
-### Build details
-
-- Base: `nvidia/cuda:12.1.1-cudnn-runtime-ubuntu22.04`
-- PyTorch: `2.3.1+cu121`, Torchaudio matched
-- NeMo: `nemo_toolkit[asr]==1.23.0`
-- Optional model prefetch during build to avoid cold start
-
-### Known limitations
-
-- Cache-aware streaming path uses fp32 internally and forces fp32 in several layers, so fp16/bf16/INT8 are not supported here.
-- If you need INT8/FP8 with TensorRT, you must export and implement a custom stateful streaming loop; parity with NeMo’s cache-aware step is not guaranteed.
+Override `MOONSHINE_MODEL_ID`, `MOONSHINE_PRECISION`, or `MAX_BATCH_SIZE` via `docker run -e ...`.

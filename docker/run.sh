@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+IMAGE_NAME="${IMAGE_NAME:-moonshine-asr}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+PORT="${ASR_PORT:-8000}"
+MODEL_ID="${MOONSHINE_MODEL_ID:-UsefulSensors/moonshine-base}"
+PRECISION="${MOONSHINE_PRECISION:-fp16}"
+MAX_BATCH="${MAX_BATCH_SIZE:-32}"
 
-docker run --rm -it \
+exec docker run --rm -it \
   --gpus all \
-  -e NVIDIA_VISIBLE_DEVICES=$NVIDIA_VISIBLE_DEVICES \
-  -e OMP_NUM_THREADS=1 -e MKL_NUM_THREADS=1 \
-  -p 8000:8000 \
-  fastconf-streaming:latest
-
-
+  -p "$PORT:8000" \
+  -e MOONSHINE_MODEL_ID="$MODEL_ID" \
+  -e MOONSHINE_PRECISION="$PRECISION" \
+  -e MAX_BATCH_SIZE="$MAX_BATCH" \
+  "$IMAGE_NAME:$IMAGE_TAG"
