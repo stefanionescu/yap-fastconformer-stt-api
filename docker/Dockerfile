@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
+FROM alphacep/kaldi-vosk-server-gpu:latest
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
@@ -6,6 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 ARG MODEL_URL=https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip
 ARG MODEL_NAME=vosk-model-en-us-0.22
 
+# Base already contains CUDA-enabled libvosk; install runtime tools and Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv \
     ffmpeg libsndfile1 git curl ca-certificates unzip \
@@ -14,7 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt
+# Important: do NOT install PyPI 'vosk'; keep the GPU lib from the base image
+RUN sed -i '/^vosk[=<>]/d' /app/requirements.txt && \
+    python3 -m pip install --no-cache-dir -r /app/requirements.txt
 
 RUN mkdir -p /models/en /tmp/model && \
     curl -L -o /tmp/model.zip "$MODEL_URL" && \
@@ -33,4 +36,5 @@ ENV MODEL_DIR=/models/en \
     LOG_LEVEL=INFO
 
 EXPOSE 8000
+ENTRYPOINT []
 CMD ["python3", "-m", "server.ws_server"]

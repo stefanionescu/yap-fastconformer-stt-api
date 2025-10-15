@@ -11,7 +11,7 @@ from typing import Optional
 import websockets
 from websockets.exceptions import ConnectionClosed
 from websockets.server import WebSocketServerProtocol
-from vosk import KaldiRecognizer, Model, SetLogLevel
+from vosk import KaldiRecognizer, Model, SetLogLevel, GpuInit
 
 from .settings import Settings
 
@@ -64,6 +64,12 @@ class VoskServer:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        # Initialize CUDA backend for Vosk before creating the Model
+        try:
+            GpuInit()
+        except Exception:
+            # If GPU init fails, continue; libvosk may still run in CPU mode
+            LOGGER.warning("GpuInit() failed; falling back to CPU if available", exc_info=True)
         SetLogLevel(settings.vosk_log_level)
         LOGGER.info("Loading Vosk model from %s", settings.model_dir)
         self.model = Model(str(settings.model_dir))

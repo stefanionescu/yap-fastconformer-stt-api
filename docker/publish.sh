@@ -8,10 +8,11 @@ Usage: DOCKER_IMAGE=<username/repo> [DOCKER_TAG=latest] [MODEL_URL=...] [MODEL_N
 Environment variables:
   DOCKER_IMAGE  (required) Docker Hub repository, e.g. myuser/vosk-gpu-ws
   DOCKER_TAG    (optional) Tag to apply/push (default: latest)
+  DOCKER_PLATFORM (optional) Target platform for buildx (default: linux/amd64)
   MODEL_URL     (optional) Override model download URL at build time
   MODEL_NAME    (optional) Folder name inside the model archive
 
-The script will run 'docker build' followed by 'docker push'.
+The script uses 'docker buildx build --platform=...' and pushes the image.
 USAGE
 }
 
@@ -27,6 +28,7 @@ if [[ -z "${DOCKER_IMAGE:-}" ]]; then
 fi
 
 DOCKER_TAG=${DOCKER_TAG:-latest}
+DOCKER_PLATFORM=${DOCKER_PLATFORM:-linux/amd64}
 declare -a BUILD_ARGS=()
 
 if [[ -n "${MODEL_URL:-}" ]]; then
@@ -39,14 +41,22 @@ fi
 
 IMAGE_REF="${DOCKER_IMAGE}:${DOCKER_TAG}"
 
-echo "[publish] Building ${IMAGE_REF}"
+echo "[publish] Building ${IMAGE_REF} for platform ${DOCKER_PLATFORM} (buildx)"
 if (( ${#BUILD_ARGS[@]} )); then
-  docker build "${BUILD_ARGS[@]}" -t "${IMAGE_REF}" -f docker/Dockerfile .
+  docker buildx build \
+    "${BUILD_ARGS[@]}" \
+    --platform="${DOCKER_PLATFORM}" \
+    --tag "${IMAGE_REF}" \
+    --file docker/Dockerfile \
+    --push \
+    .
 else
-  docker build -t "${IMAGE_REF}" -f docker/Dockerfile .
+  docker buildx build \
+    --platform="${DOCKER_PLATFORM}" \
+    --tag "${IMAGE_REF}" \
+    --file docker/Dockerfile \
+    --push \
+    .
 fi
-
-echo "[publish] Pushing ${IMAGE_REF}"
-docker push "${IMAGE_REF}"
 
 echo "[publish] Done"

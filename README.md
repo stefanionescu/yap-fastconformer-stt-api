@@ -17,22 +17,40 @@ docker build \
   -t vosk-gpu-ws:latest \
   -f docker/Dockerfile .
 
-# Launch on a CUDA host
+# If you are on Apple Silicon or need an x86_64 image locally, use buildx
+# and pin the platform (the --load flag imports the image into your local daemon):
+# docker buildx build --platform=linux/amd64 -t vosk-gpu-ws:latest -f docker/Dockerfile . --load
+
+# Launch on a CUDA host (NVIDIA Container Toolkit required)
 docker run --rm -it --gpus all \
   -p 8000:8000 \
   -e CONCURRENCY=64 \
   vosk-gpu-ws:latest
 ```
 
+### Notes on GPU base image
+
+- Base image: `alphacep/kaldi-vosk-server-gpu:latest` (bundles CUDA-enabled Kaldi/Vosk, including `libvosk` with GPU support). We intentionally do not `pip install vosk`; doing so would replace the GPU build with the CPU wheel.
+- To change the port inside the container, set `PORT` (our server) or if you use the Alphacep WS server directly, `VOSK_SERVER_PORT` (default 2700).
+- Verify GPU usage during decoding with: `nvidia-smi dmon -s u`.
+
 ### Build & push to your Docker Hub registry
 
 ```bash
 export DOCKER_IMAGE=my-dockerhub-user/vosk-gpu-ws
 export DOCKER_TAG=prod        # optional, defaults to "latest"
+# Optional: override target platform (defaults to linux/amd64)
+# export DOCKER_PLATFORM=linux/arm64
 bash docker/publish.sh
 ```
 
-The helper script wraps `docker build` and `docker push` so you can ship an image to any Docker Hub namespace. Override `MODEL_URL` / `MODEL_NAME` in the environment before running if you want to embed a different acoustic model.
+The helper script uses `docker buildx build --platform=${DOCKER_PLATFORM:-linux/amd64}` and pushes the image, so it automatically targets Linux/x86_64 by default. Override `MODEL_URL` / `MODEL_NAME` in the environment before running if you want to embed a different acoustic model. To publish for a different architecture, set `DOCKER_PLATFORM` (e.g. `linux/arm64`).
+
+Verify what was built:
+
+```bash
+docker image inspect ${DOCKER_IMAGE}:${DOCKER_TAG:-latest} --format '{{.Architecture}}/{{.Os}}'
+```
 
 The server starts immediately after loading the Vosk model and listens on `ws://0.0.0.0:8000`.
 
@@ -60,6 +78,8 @@ All knobs are exposed via environment variables (same in Docker and bare-metal):
 - `ENABLE_WORD_TIMES` (`1`/`0`; default `1`)
 - `LOG_LEVEL` (default `INFO`)
 - `VOSK_LOG_LEVEL` (default `-1` → suppress Vosk debug output)
+
+The server initializes the GPU path at startup via `GpuInit()` before loading the model. If initialization fails, it logs a warning and continues (CPU path), but on the GPU base this should succeed when a CUDA device is present.
 
 ## WebSocket Protocol
 - Endpoint: `ws://<host>:<port>`
