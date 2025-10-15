@@ -11,14 +11,15 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from omegaconf import OmegaConf
 
+import torch
 import nemo.collections.asr as nemo_asr
 
 SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2
-STEP_MS = int(os.getenv("STEP_MS", "240"))
-RIGHT_CONTEXT_MS = int(os.getenv("RIGHT_CONTEXT_MS", "160"))
-MIN_EMIT_CHARS = int(os.getenv("MIN_EMIT_CHARS", "2"))
-MAX_INFLIGHT_STEPS = int(os.getenv("MAX_INFLIGHT_STEPS", "1"))
+STEP_MS = int(os.getenv("STEP_MS", "80"))
+RIGHT_CONTEXT_MS = int(os.getenv("RIGHT_CONTEXT_MS", "120"))
+MIN_EMIT_CHARS = int(os.getenv("MIN_EMIT_CHARS", "1"))
+MAX_INFLIGHT_STEPS = int(os.getenv("MAX_INFLIGHT_STEPS", "4"))
 
 CONTROL_PREFIX = b"__CTRL__:"
 CTRL_EOS = b"EOS"
@@ -26,6 +27,8 @@ CTRL_RESET = b"RESET"
 
 print("Loading NeMo Parakeet-TDT-0.6b-v3 …")
 model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v3")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
 model.eval()
 model.freeze()
 
@@ -34,6 +37,11 @@ _decoding_cfg = OmegaConf.create(
         "strategy": "greedy",
         "compute_timestamps": False,
         "preserve_alignments": False,
+        "greedy": {
+            "loop_labels": True,
+            "use_cuda_graph_decoder": True,
+            "max_symbols_per_step": 10,
+        },
     }
 )
 model.change_decoding_strategy(_decoding_cfg)
@@ -64,7 +72,7 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
 
     rc_bytes = _bytes_per_window(RIGHT_CONTEXT_MS)
     window = state.pcm[: needed + rc_bytes]
-    audio = np.frombuffer(window, dtype=np.int16).astype(np.float32)
+    audio = (np.frombuffer(window, dtype=np.int16).astype(np.float32) / 32768.0)
 
     async with gpu_semaphore:
         hyps = model.transcribe(
@@ -97,7 +105,7 @@ def flush_final(state: StreamState) -> str:
 
 async def finalize(state: StreamState) -> str:
     if len(state.pcm) > 0:
-        audio = np.frombuffer(state.pcm, dtype=np.int16).astype(np.float32)
+        audio = (np.frombuffer(state.pcm, dtype=np.int16).astype(np.float32) / 32768.0)
         async with gpu_semaphore:
             hyps = model.transcribe(
                 audio=[audio],
@@ -120,13 +128,12 @@ app = FastAPI()
 
 @app.on_event("startup")
 def _warmup() -> None:
-    # Send a short zero buffer to initialize CUDA graphs and JIT paths
-    x = np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.int16).astype(np.float32)
+    # Build CUDA kernels and CUDA graph paths with a tiny zero buffer
+    x = np.zeros(int(0.25 * SAMPLE_RATE), dtype=np.float32)
     try:
-        model.transcribe(audio=[x], batch_size=1, return_hypotheses=False)
-    except Exception:
-        # Warmup is best-effort and should not block startup
-        pass
+        model.transcribe(audio=[x], batch_size=1, return_hypotheses=False, num_workers=0)
+    except Exception as e:
+        print(f"[warmup] non-fatal: {e}")
 
 
 @app.get("/status")
