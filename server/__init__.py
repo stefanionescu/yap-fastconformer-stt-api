@@ -36,53 +36,14 @@ model.eval()
 model.freeze()
 print(f"[nemo] {nemo.__version__}")
 
-# Configure RNNT decoding to exclude TDT duration tokens from text output
+# Configure RNNT decoding - simplified for better reliability
 _decoding_cfg = OmegaConf.create({
-    "model_type": "rnnt",
     "strategy": "greedy",
-    "compute_timestamps": False,
-    "compute_hypothesis_token_set": False,
     "preserve_alignments": False,
-    "rnnt_timestamp_type": "all",
-    "fused_batch_size": -1,
-
-    # Ensure TDT duration symbols are not surfaced as text
-    "durations": [0, 1, 2, 3, 4],
-    "big_blank_durations": [],
-    "word_seperator": " ",
-    "segment_seperators": [".", "!", "?"],
-
-    "confidence_cfg": {
-        "preserve_frame_confidence": False,
-        "preserve_token_confidence": False,
-        "preserve_word_confidence": False,
-        "exclude_blank": True,
-        "aggregation": "min",
-        "tdt_include_duration": False,
-        "method_cfg": {
-            "name": "entropy",
-            "entropy_type": "tsallis",
-            "alpha": 0.33,
-            "entropy_norm": "exp",
-        },
-    },
-
+    "preserve_frame_confidence": False,
+    "compute_timestamps": False,
     "greedy": {
         "max_symbols_per_step": 10,
-        "loop_labels": True,
-        "use_cuda_graph_decoder": False,
-        "preserve_alignments": False,
-        "preserve_frame_confidence": False,
-        "tdt_include_token_duration": False,
-        "tdt_include_duration_confidence": False,
-        "confidence_method_cfg": {
-            "name": "entropy",
-            "entropy_type": "tsallis",
-            "alpha": 0.33,
-            "entropy_norm": "exp",
-        },
-        "ngram_lm_model": None,
-        "ngram_lm_alpha": 0.0,
     },
 })
 model.change_decoding_strategy(_decoding_cfg)
@@ -151,50 +112,71 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
     window = state.pcm[: needed + rc_bytes]
     audio_t = _bytes_to_f32_mono_tensor(window, device).contiguous()
     length_t = torch.tensor([audio_t.shape[1]], device=device, dtype=torch.int64)
+    
     if getattr(state, "_dbg_seen", 0) < MAX_DEBUG_STEPS:
         a = audio_t[0].detach().float().cpu().numpy()
-        print(f"[step] bytes={len(window)} f32.min={a.min():.3f} f32.max={a.max():.3f} f32.rms≈{float(np.sqrt((a*a).mean()+1e-12)):.3f}")
+        print(f"[step] bytes={len(window)} f32.min={a.min():.3f} f32.max={a.max():.3f}")
 
     async with gpu_semaphore:
         with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+            # Process audio through model
             proc, proc_len = model.preprocessor(input_signal=audio_t, length=length_t)
-            # encoder expects audio_signal and length
             enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
-            # RNNT decoder expects [B, T, C]; encoder returns [B, C, T]
-            enc = enc.transpose(1, 2).contiguous()
-            out = model.decoding.rnnt_decoder_predictions_tensor(
-                enc,
-                enc_len,
-                return_hypotheses=True,
-                partial_hypotheses=[state.partial] if state.partial is not None else None,
-            )
-            hyps = out[0] if isinstance(out, tuple) else out
-    hyp = hyps[0]
+            
+            # Debug original encoder output shape
+            if getattr(state, "_dbg_seen", 0) == 0:
+                print(f"[dbg] enc.shape={tuple(enc.shape)} enc_len={int(enc_len[0])}")
+            
+            # CRITICAL FIX: Check if encoder output is [B, C, T] format
+            # NeMo Conformer/FastConformer outputs [B, C, T], decoder needs [B, T, C]
+            # We check if dim 1 looks like a feature dimension (typically 256-1024)
+            # and dim 2 looks like time frames (varies with audio length)
+            if enc.ndim == 3 and enc.shape[1] in range(128, 2048):
+                # Likely [B, C, T] format - transpose to [B, T, C]
+                enc = enc.transpose(1, 2).contiguous()
+                if getattr(state, "_dbg_seen", 0) == 0:
+                    print(f"[dbg] transposed to enc.shape={tuple(enc.shape)}")
+            
+            # Use transcribe instead of direct decoder call for streaming
+            # This handles the decoder state properly
+            if state.partial is None:
+                # First chunk - no previous state
+                hyps = model.decoding.rnnt_decoder_predictions_tensor(
+                    encoder_output=enc,
+                    encoded_lengths=enc_len,
+                    return_hypotheses=True,
+                )
+            else:
+                # Continuing chunks - pass previous hypothesis
+                hyps = model.decoding.rnnt_decoder_predictions_tensor(
+                    encoder_output=enc,
+                    encoded_lengths=enc_len,
+                    return_hypotheses=True,
+                    partial_hypotheses=[state.partial],
+                )
+            
+    # Extract hypothesis
+    hyp = hyps[0] if isinstance(hyps, (list, tuple)) else hyps
     state.partial = hyp
-    # Prefer NeMo's post-processed hyp.text for TDT; fallback to ids->text
+    
+    # Get text from hypothesis
     try:
-        text = hyp.text or model.tokenizer.ids_to_text(hyp.y_sequence.tolist())
-    except Exception:
-        text = hyp.text or ""
-    # Print encoder shape once for sanity
-    if not hasattr(state, "_dbg_once"):
-        try:
-            print(f"[dbg] enc.shape={tuple(enc.shape)} enc_len0={int(enc_len[0])}")
-        except Exception:
-            pass
-        state._dbg_once = True
+        text = hyp.text if hasattr(hyp, 'text') else ""
+        if not text and hasattr(hyp, 'y_sequence'):
+            text = model.tokenizer.ids_to_text(hyp.y_sequence.tolist())
+    except Exception as e:
+        print(f"[error] extracting text: {e}")
+        text = ""
+    
+    # Emit delta
     delta: Optional[str] = None
     if len(text) >= len(state.last_text) + MIN_EMIT_CHARS:
-        delta = text[len(state.last_text) :]
+        delta = text[len(state.last_text):]
         state.last_text = text
         if getattr(state, "_dbg_seen", 0) < MAX_DEBUG_STEPS:
-            print(f"[step] partial+ delta='{delta[:40]}' total_len={len(text)}")
-            try:
-                print("[dbg] first10:", [ord(c) for c in (text[:10])])
-            except Exception:
-                pass
+            print(f"[step] delta='{delta[:40]}' total_len={len(text)}")
+    
     state._dbg_seen = getattr(state, "_dbg_seen", 0) + 1
-
     del state.pcm[:needed]
     return delta
 
@@ -214,35 +196,56 @@ def flush_final(state: StreamState) -> str:
 
 
 async def finalize(state: StreamState) -> str:
+    if len(state.pcm) == 0 and state.partial:
+        # No more audio, just return what we have
+        try:
+            return state.partial.text or ""
+        except:
+            return ""
+    
     if len(state.pcm) > 0:
-        # Pad a bit of future context so RNNT can commit final tokens
+        # Pad with silence to flush remaining audio
         rc_bytes = _bytes_per_window(RIGHT_CONTEXT_MS)
-        if rc_bytes > 0:
-            state.pcm.extend(b"\x00" * rc_bytes)
+        state.pcm.extend(b"\x00" * rc_bytes)
+        
         audio_t = _bytes_to_f32_mono_tensor(state.pcm, device).contiguous()
         length_t = torch.tensor([audio_t.shape[1]], device=device, dtype=torch.int64)
+        
         async with gpu_semaphore:
             with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
                 proc, proc_len = model.preprocessor(input_signal=audio_t, length=length_t)
                 enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
-                # RNNT decoder expects [B, T, C]; encoder returns [B, C, T]
-                enc = enc.transpose(1, 2).contiguous()
-                out = model.decoding.rnnt_decoder_predictions_tensor(
-                    enc,
-                    enc_len,
-                    return_hypotheses=True,
-                    partial_hypotheses=[state.partial] if state.partial else None,
-                )
-                hyps = out[0] if isinstance(out, tuple) else out
-        state.partial = hyps[0]
-
-    if state.partial:
-        try:
-            final = state.partial.text or model.tokenizer.ids_to_text(state.partial.y_sequence.tolist())
-        except Exception:
-            final = state.partial.text or ""
-    else:
+                
+                # Same transpose fix
+                if enc.ndim == 3 and enc.shape[1] in range(128, 2048):
+                    enc = enc.transpose(1, 2).contiguous()
+                
+                if state.partial is None:
+                    hyps = model.decoding.rnnt_decoder_predictions_tensor(
+                        encoder_output=enc,
+                        encoded_lengths=enc_len,
+                        return_hypotheses=True,
+                    )
+                else:
+                    hyps = model.decoding.rnnt_decoder_predictions_tensor(
+                        encoder_output=enc,
+                        encoded_lengths=enc_len,
+                        return_hypotheses=True,
+                        partial_hypotheses=[state.partial],
+                    )
+        
+        state.partial = hyps[0] if isinstance(hyps, (list, tuple)) else hyps
+    
+    # Extract final text
+    try:
+        final = state.partial.text if state.partial else ""
+        if not final and state.partial and hasattr(state.partial, 'y_sequence'):
+            final = model.tokenizer.ids_to_text(state.partial.y_sequence.tolist())
+    except Exception as e:
+        print(f"[error] finalizing: {e}")
         final = ""
+    
+    # Reset state
     state.pcm.clear()
     state.partial = None
     state.last_text = ""
@@ -254,16 +257,31 @@ app = FastAPI()
 
 @app.on_event("startup")
 def _warmup() -> None:
-    # Build kernels + graph once with a tiny buffer (preproc + encoder only)
     try:
-        with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
-            x = torch.zeros(1, int(0.25 * SAMPLE_RATE), device=device, dtype=torch.float32).contiguous()
+        with torch.inference_mode():
+            x = torch.zeros(1, int(0.5 * SAMPLE_RATE), device=device, dtype=torch.float32)
             length_t = torch.tensor([x.shape[1]], device=device, dtype=torch.int64)
+            
             proc, proc_len = model.preprocessor(input_signal=x, length=length_t)
-            _enc, _enc_len = model.encoder(audio_signal=proc, length=proc_len)
-            # 🔕 No decoder call here
+            enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
+            
+            print(f"[warmup] enc.shape={tuple(enc.shape)}")
+            
+            # Same transpose fix
+            if enc.ndim == 3 and enc.shape[1] in range(128, 2048):
+                enc = enc.transpose(1, 2).contiguous()
+                print(f"[warmup] transposed to {tuple(enc.shape)}")
+            
+            _ = model.decoding.rnnt_decoder_predictions_tensor(
+                encoder_output=enc,
+                encoded_lengths=enc_len,
+                return_hypotheses=True,
+            )
+        print("[warmup] Complete")
     except Exception as e:
-        print(f"[warmup] non-fatal: {e}")
+        print(f"[warmup] Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 @app.get("/status")
