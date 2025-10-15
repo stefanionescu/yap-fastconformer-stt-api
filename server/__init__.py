@@ -15,8 +15,8 @@ import nemo.collections.asr as nemo_asr
 
 SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2
-STEP_MS = int(os.getenv("STEP_MS", "80"))
-RIGHT_CONTEXT_MS = int(os.getenv("RIGHT_CONTEXT_MS", "120"))
+STEP_MS = int(os.getenv("STEP_MS", "40"))
+RIGHT_CONTEXT_MS = int(os.getenv("RIGHT_CONTEXT_MS", "160"))
 MIN_EMIT_CHARS = int(os.getenv("MIN_EMIT_CHARS", "1"))
 MAX_INFLIGHT_STEPS = int(os.getenv("MAX_INFLIGHT_STEPS", "4"))
 
@@ -67,7 +67,7 @@ _decoding_cfg = OmegaConf.create({
     "greedy": {
         "max_symbols_per_step": 10,
         "loop_labels": True,
-        "use_cuda_graph_decoder": bool(torch.cuda.is_available()),
+        "use_cuda_graph_decoder": False,
         "preserve_alignments": False,
         "preserve_frame_confidence": False,
         "tdt_include_token_duration": False,
@@ -177,7 +177,11 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
     hyp = hyps[0]
     state.partial = hyp
 
-    text = hyp.text or ""
+    # Decode robustly from token IDs to avoid any issues with hyp.text for TDT
+    try:
+        text = model.tokenizer.ids_to_text(hyp.y_sequence.tolist())
+    except Exception:
+        text = hyp.text or ""
     delta: Optional[str] = None
     if len(text) >= len(state.last_text) + MIN_EMIT_CHARS:
         delta = text[len(state.last_text) :]
@@ -195,7 +199,13 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
 
 
 def flush_final(state: StreamState) -> str:
-    final_text = state.partial.text if state.partial else ""
+    if state.partial:
+        try:
+            final_text = model.tokenizer.ids_to_text(state.partial.y_sequence.tolist())
+        except Exception:
+            final_text = state.partial.text or ""
+    else:
+        final_text = ""
     state.pcm.clear()
     state.partial = None
     state.last_text = ""
@@ -223,7 +233,13 @@ async def finalize(state: StreamState) -> str:
                 hyps = out[0] if isinstance(out, tuple) else out
         state.partial = hyps[0]
 
-    final = state.partial.text if state.partial else ""
+    if state.partial:
+        try:
+            final = model.tokenizer.ids_to_text(state.partial.y_sequence.tolist())
+        except Exception:
+            final = state.partial.text or ""
+    else:
+        final = ""
     state.pcm.clear()
     state.partial = None
     state.last_text = ""

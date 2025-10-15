@@ -29,6 +29,7 @@ What happens:
 6. `scripts/05_run_server.sh` activates `.venv` and execs `uvicorn server:app` on `0.0.0.0:8000`.
 
 All stdout/stderr is appended to `logs/run_<timestamp>.log` with a symlink at `logs/latest.log`. `scripts/main.sh` automatically tails the log after launching; hit `Ctrl+C` to drop the tail — the background process keeps running. Logs are still available via:
+
 ```bash
 tail -f logs/latest.log
 ```

@@ -1,4 +1,4 @@
-nemo_toolkit[asr]==2.4.0
+nemo_toolkit[asr]==2.5.0
 torchaudio==2.4.0
 fastapi==0.115.12
 uvicorn[standard]==0.30.6
