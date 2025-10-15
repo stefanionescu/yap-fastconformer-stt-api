@@ -29,6 +29,7 @@ print("Loading NeMo Parakeet-TDT-0.6b-v3 …")
 model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v3")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
+print(f"[device] torch_device={device} is_cuda={next(model.parameters()).is_cuda if hasattr(model,'parameters') else 'n/a'}")
 model.eval()
 model.freeze()
 
@@ -61,6 +62,9 @@ class StreamState:
         self.last_text = ""
 
 
+MAX_DEBUG_STEPS = int(os.getenv("DEBUG_STEPS", "8"))
+
+
 def _bytes_per_window(step_ms: int) -> int:
     return int(SAMPLE_RATE * (step_ms / 1000.0)) * BYTES_PER_SAMPLE
 
@@ -72,7 +76,12 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
 
     rc_bytes = _bytes_per_window(RIGHT_CONTEXT_MS)
     window = state.pcm[: needed + rc_bytes]
-    audio = (np.frombuffer(window, dtype=np.int16).astype(np.float32) / 32768.0)
+    audio_i16 = np.frombuffer(window, dtype=np.int16)
+    # Fast sanity: are we receiving non-zero audio?
+    if getattr(state, "_dbg_seen", 0) < MAX_DEBUG_STEPS:
+        rms = float(np.sqrt((audio_i16.astype(np.float64) ** 2).mean() + 1e-9))
+        print(f"[step] bytes={len(window)} i16.min={audio_i16.min()} i16.max={audio_i16.max()} i16.rms≈{rms:.1f}")
+    audio = (audio_i16.astype(np.float32) / 32768.0)
 
     async with gpu_semaphore:
         hyps = model.transcribe(
@@ -90,6 +99,9 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
     if len(text) >= len(state.last_text) + MIN_EMIT_CHARS:
         delta = text[len(state.last_text) :]
         state.last_text = text
+        if getattr(state, "_dbg_seen", 0) < MAX_DEBUG_STEPS:
+            print(f"[step] partial+ delta='{delta[:40]}' total_len={len(text)}")
+    state._dbg_seen = getattr(state, "_dbg_seen", 0) + 1
 
     del state.pcm[:needed]
     return delta
@@ -105,6 +117,10 @@ def flush_final(state: StreamState) -> str:
 
 async def finalize(state: StreamState) -> str:
     if len(state.pcm) > 0:
+        # Pad a bit of future context so RNNT can commit final tokens
+        rc_bytes = _bytes_per_window(RIGHT_CONTEXT_MS)
+        if rc_bytes > 0:
+            state.pcm.extend(b"\x00" * rc_bytes)
         audio = (np.frombuffer(state.pcm, dtype=np.int16).astype(np.float32) / 32768.0)
         async with gpu_semaphore:
             hyps = model.transcribe(
