@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 if __package__ in {None, ""}:
-    sys.path.append(str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.client import (  # noqa: E402
     SAMPLE_RATE,

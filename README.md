@@ -68,21 +68,24 @@ Endpoint: `ws://<host>:8000/ws`
 - Health check endpoint: `GET /status` → `200 ok`.
 
 ## Clients, Warmup, and Benchmarks
-All clients assume `.venv` is active (`source .venv/bin/activate`) or you run via the provided scripts.
+Activate the virtualenv first:
+```bash
+source .venv/bin/activate
+```
 
 ### Smoke test
 ```bash
-./.venv/bin/python tests/client.py --file mid.wav --full-text
+python tests/client.py --file mid.wav --full-text
 ```
 
 ### Warmup / latency probe
 ```bash
-./.venv/bin/python tests/warmup.py --file mid.wav --rtf 10 --print-partials
+python tests/warmup.py --file mid.wav --rtf 10 --print-partials
 ```
 
 ### Concurrency benchmark
 ```bash
-./.venv/bin/python tests/bench.py --url ws://127.0.0.1:8000/ws --streams 64 --duration 30
+python tests/bench.py --url ws://127.0.0.1:8000/ws --streams 64 --duration 30
 ```
 
 ### Standalone utilities
