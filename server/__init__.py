@@ -64,11 +64,11 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
 
     rc_bytes = _bytes_per_window(RIGHT_CONTEXT_MS)
     window = state.pcm[: needed + rc_bytes]
-    audio = np.frombuffer(window, dtype=np.int16).astype(np.float32) / 32768.0
+    audio = np.frombuffer(window, dtype=np.int16).astype(np.float32)
 
     async with gpu_semaphore:
         hyps = model.transcribe(
-            audio=[audio],
+            audio_list=[audio],
             batch_size=1,
             return_hypotheses=True,
             partial_hypothesis=[state.partial] if state.partial is not None else None,
@@ -95,7 +95,38 @@ def flush_final(state: StreamState) -> str:
     return final_text
 
 
+async def finalize(state: StreamState) -> str:
+    if len(state.pcm) > 0:
+        audio = np.frombuffer(state.pcm, dtype=np.int16).astype(np.float32)
+        async with gpu_semaphore:
+            hyps = model.transcribe(
+                audio_list=[audio],
+                batch_size=1,
+                return_hypotheses=True,
+                partial_hypothesis=[state.partial] if state.partial else None,
+                num_workers=0,
+            )
+        state.partial = hyps[0]
+
+    final = state.partial.text if state.partial else ""
+    state.pcm.clear()
+    state.partial = None
+    state.last_text = ""
+    return final
+
+
 app = FastAPI()
+
+
+@app.on_event("startup")
+def _warmup() -> None:
+    # Send a short zero buffer to initialize CUDA graphs and JIT paths
+    x = np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.int16).astype(np.float32)
+    try:
+        model.transcribe(audio_list=[x], batch_size=1, return_hypotheses=False)
+    except Exception:
+        # Warmup is best-effort and should not block startup
+        pass
 
 
 @app.get("/status")
@@ -114,7 +145,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
             if msg.startswith(CONTROL_PREFIX):
                 cmd = msg[len(CONTROL_PREFIX) :]
                 if cmd == CTRL_EOS:
-                    final = flush_final(state)
+                    final = await finalize(state)
                     await ws.send_text(json.dumps({"type": "final", "text": final}))
                 elif cmd == CTRL_RESET:
                     flush_final(state)
@@ -127,8 +158,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 await ws.send_text(json.dumps({"type": "partial", "text": delta}))
 
     except WebSocketDisconnect:
-        if state.partial:
-            final = flush_final(state)
+        if state.partial or len(state.pcm) > 0:
+            final = await finalize(state)
             try:
                 await ws.send_text(json.dumps({"type": "final", "text": final}))
             except Exception:

@@ -9,7 +9,7 @@ export PYTHONUNBUFFERED=1
 
 export STEP_MS="${STEP_MS:-240}"
 export RIGHT_CONTEXT_MS="${RIGHT_CONTEXT_MS:-160}"
-export MAX_INFLIGHT_STEPS="${MAX_INFLIGHT_STEPS:-1}"
+export MAX_INFLIGHT_STEPS="${MAX_INFLIGHT_STEPS:-2}"
 
 echo "[05] Starting server (uvicorn)…"
 exec python -m uvicorn server:app --host 0.0.0.0 --port 8000 --ws auto --loop uvloop
