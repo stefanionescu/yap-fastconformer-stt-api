@@ -4,18 +4,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import sys
 from pathlib import Path
 
-if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from tests.client import (  # noqa: E402
-    SAMPLE_RATE,
-    load_audio,
-    resolve_sample_path,
-    stream_session,
-)
+from utils import SAMPLE_RATE, load_audio, resolve_sample_path, stream_session
 
 
 def parse_args() -> argparse.Namespace:

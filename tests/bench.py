@@ -4,16 +4,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import sys
 import time
-from pathlib import Path
 
 import numpy as np
 
-if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from tests.client import SAMPLE_RATE, stream_session  # noqa: E402
+from utils import SAMPLE_RATE, stream_session
 
 
 def parse_args() -> argparse.Namespace:
