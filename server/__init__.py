@@ -39,7 +39,7 @@ print(f"[nemo] {nemo.__version__}")
 # Configure RNNT decoding to exclude TDT duration tokens from text output
 _decoding_cfg = OmegaConf.create({
     "model_type": "rnnt",
-    "strategy": "greedy_batch",
+    "strategy": "greedy",
     "compute_timestamps": False,
     "compute_hypothesis_token_set": False,
     "preserve_alignments": False,
