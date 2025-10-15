@@ -134,38 +134,20 @@ def _frame_ok(n: int) -> bool:
 
 def _bytes_to_f32_mono_tensor(buf: bytes, device: torch.device) -> torch.Tensor:
     """
-    Decode either s16le or f32le PCM chunk into a 1xT float32 tensor in [-1, 1].
-    Heuristics:
-      * Prefer s16 if buf length divisible by 2 and s16 RMS > tiny.
-      * If buf length divisible by 4 and s16 looks like silence, treat as f32.
+    Decode s16le PCM chunk into a 1xT float32 tensor in [-1, 1].
+    Strict s16le → f32 in [-1, 1]
     """
-    n = len(buf)
-    as_f32 = False
-    looks_f32 = (n % 4) == 0
-
-    audio_i16 = np.frombuffer(buf, dtype=np.int16)
-    if audio_i16.size > 0:
-        rms_i16 = float(np.sqrt((audio_i16.astype(np.float64) ** 2).mean() + 1e-12))
-        if looks_f32 and rms_i16 <= 2.0:
-            as_f32 = True
-    else:
-        as_f32 = looks_f32
-
-    if not as_f32:
-        audio = (audio_i16.astype(np.float32) / 32768.0)
-    else:
-        audio = np.frombuffer(buf, dtype=np.float32)
-        np.clip(audio, -1.0, 1.0, out=audio)
-
+    audio_i16 = np.frombuffer(buf, dtype='<i2')  # little-endian int16
+    audio = (audio_i16.astype(np.float32) / 32768.0)
     return torch.from_numpy(audio.copy()).to(device=device, dtype=torch.float32).unsqueeze(0)
 
 
 async def rnnt_step(state: StreamState) -> Optional[str]:
     needed = _bytes_per_window(STEP_MS)
-    if len(state.pcm) < needed:
+    rc_bytes = _bytes_per_window(RIGHT_CONTEXT_MS)
+    if len(state.pcm) < needed + rc_bytes:
         return None
 
-    rc_bytes = _bytes_per_window(RIGHT_CONTEXT_MS)
     window = state.pcm[: needed + rc_bytes]
     audio_t = _bytes_to_f32_mono_tensor(window, device).contiguous()
     length_t = torch.tensor([audio_t.shape[1]], device=device, dtype=torch.int64)
@@ -195,12 +177,12 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
     except Exception:
         text = hyp.text or ""
     # Print encoder shape once for sanity
-    if not hasattr(state, "_dbg_printed_enc_shape"):
+    if not hasattr(state, "_dbg_once"):
         try:
-            print(f"[dbg] enc.shape={tuple(enc.shape)} len0={int(enc_len[0])}")
+            print(f"[dbg] enc.shape={tuple(enc.shape)} enc_len0={int(enc_len[0])}")
         except Exception:
             pass
-        state._dbg_printed_enc_shape = True
+        state._dbg_once = True
     delta: Optional[str] = None
     if len(text) >= len(state.last_text) + MIN_EMIT_CHARS:
         delta = text[len(state.last_text) :]
@@ -272,16 +254,14 @@ app = FastAPI()
 
 @app.on_event("startup")
 def _warmup() -> None:
-    # Build kernels + graph once with a tiny buffer
+    # Build kernels + graph once with a tiny buffer (preproc + encoder only)
     try:
         with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
             x = torch.zeros(1, int(0.25 * SAMPLE_RATE), device=device, dtype=torch.float32).contiguous()
             length_t = torch.tensor([x.shape[1]], device=device, dtype=torch.int64)
             proc, proc_len = model.preprocessor(input_signal=x, length=length_t)
-            enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
-            # RNNT decoder expects [B, T, C]; encoder returns [B, C, T]
-            enc = enc.transpose(1, 2).contiguous()
-            _ = model.decoding.rnnt_decoder_predictions_tensor(enc, enc_len, return_hypotheses=False)
+            _enc, _enc_len = model.encoder(audio_signal=proc, length=proc_len)
+            # 🔕 No decoder call here
     except Exception as e:
         print(f"[warmup] non-fatal: {e}")
 
