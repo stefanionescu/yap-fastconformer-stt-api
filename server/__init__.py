@@ -16,9 +16,9 @@ import nemo
 
 SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2
-STEP_MS = int(os.getenv("STEP_MS", "240"))
-RIGHT_CONTEXT_MS = int(os.getenv("RIGHT_CONTEXT_MS", "400"))
-MIN_EMIT_CHARS = int(os.getenv("MIN_EMIT_CHARS", "2"))
+STEP_MS = int(os.getenv("STEP_MS", "40"))
+RIGHT_CONTEXT_MS = int(os.getenv("RIGHT_CONTEXT_MS", "160"))
+MIN_EMIT_CHARS = int(os.getenv("MIN_EMIT_CHARS", "1"))
 MAX_INFLIGHT_STEPS = int(os.getenv("MAX_INFLIGHT_STEPS", "4"))
 
 CONTROL_PREFIX = b"__CTRL__:"
@@ -58,6 +58,40 @@ except Exception:
     pass
 
 gpu_semaphore = asyncio.Semaphore(MAX_INFLIGHT_STEPS)
+
+
+# --- Encoder hop and aligned sizes ---
+SR = SAMPLE_RATE
+try:
+    stride_sec = float(model._cfg.preprocessor.window_stride)
+except Exception:
+    stride_sec = 0.01  # sensible default
+try:
+    sub = int(getattr(model.encoder, "subsampling_factor", 4))
+except Exception:
+    sub = 4
+
+features_frame2samples = int(SR * stride_sec)
+# Make divisible by subsampling factor (NeMo does this internally)
+if sub > 0:
+    features_frame2samples = (features_frame2samples // sub) * sub
+ENC_HOP_SAMPLES = features_frame2samples * max(sub, 1)
+ENC_HOP_MS = 1000.0 * ENC_HOP_SAMPLES / SR
+
+def _align_samples(req_ms: int) -> int:
+    req_samples = int(SR * (req_ms / 1000.0))
+    hop = max(ENC_HOP_SAMPLES, 1)
+    k = max(1, (req_samples + hop - 1) // hop)  # ceil to >=1 hop
+    return k * hop
+
+# Aim for ~120 ms chunk (≈3 hops) and ~120 ms right context (≈3 hops)
+CHUNK_SAMPLES = _align_samples(max(STEP_MS, int(3 * ENC_HOP_MS)))
+RC_SAMPLES = _align_samples(max(RIGHT_CONTEXT_MS, int(3 * ENC_HOP_MS)))
+
+CHUNK_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
+RC_BYTES = RC_SAMPLES * BYTES_PER_SAMPLE
+
+print(f"[stream] enc_hop≈{ENC_HOP_MS:.1f} ms  chunk={CHUNK_SAMPLES/SR*1000:.1f} ms  right={RC_SAMPLES/SR*1000:.1f} ms")
 
 
 @dataclass
@@ -105,12 +139,10 @@ def _bytes_to_f32_mono_tensor(buf: bytes, device: torch.device) -> torch.Tensor:
 
 
 async def rnnt_step(state: StreamState) -> Optional[str]:
-    needed = _bytes_per_window(STEP_MS)
-    rc_bytes = _bytes_per_window(RIGHT_CONTEXT_MS)
-    if len(state.pcm) < needed + rc_bytes:
+    if len(state.pcm) < CHUNK_BYTES + RC_BYTES:
         return None
 
-    window = state.pcm[: needed + rc_bytes]
+    window = state.pcm[: CHUNK_BYTES + RC_BYTES]
     audio_t = _bytes_to_f32_mono_tensor(window, device).contiguous()
     length_t = torch.tensor([audio_t.shape[1]], device=device, dtype=torch.int64)
     
@@ -128,18 +160,16 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
             if getattr(state, "_dbg_seen", 0) == 0:
                 print(f"[dbg] enc.shape={tuple(enc.shape)} enc_len={int(enc_len[0])}")
             
-            # Use transcribe instead of direct decoder call for streaming
-            # This handles the decoder state properly
-            # Tiny tail guard: need at least 2 frames before decoding
+            # Require ≥2 encoder frames before decoding; otherwise wait for more audio
             if int(enc_len[0]) < 2:
-                pass
-            else:
-                hyps = model.decoding.rnnt_decoder_predictions_tensor(
-                    encoder_output=enc,
-                    encoded_lengths=enc_len,
-                    return_hypotheses=True,
-                    partial_hypotheses=[state.partial] if state.partial is not None else None,
-                )
+                return None
+
+            hyps = model.decoding.rnnt_decoder_predictions_tensor(
+                encoder_output=enc,
+                encoded_lengths=enc_len,
+                return_hypotheses=True,
+                partial_hypotheses=[state.partial] if state.partial is not None else None,
+            )
             
     # Extract hypothesis
     hyp = hyps[0] if isinstance(hyps, (list, tuple)) else hyps
@@ -163,7 +193,8 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
             print(f"[step] delta='{delta[:40]}' total_len={len(text)}")
     
     state._dbg_seen = getattr(state, "_dbg_seen", 0) + 1
-    del state.pcm[:needed]
+    # Slide by exactly one aligned chunk
+    del state.pcm[:CHUNK_BYTES]
     return delta
 
 
@@ -190,9 +221,9 @@ async def finalize(state: StreamState) -> str:
             return ""
     
     if len(state.pcm) > 0:
-        # Pad with a bit more than RIGHT_CONTEXT_MS to ensure stable commit
-        extra_ms = max(60, RIGHT_CONTEXT_MS // 2)
-        state.pcm.extend(b"\x00" * _bytes_per_window(RIGHT_CONTEXT_MS + extra_ms))
+        # Pad with ≥ right context, aligned
+        PAD_BYTES = RC_BYTES
+        state.pcm.extend(b"\x00" * PAD_BYTES)
         
         audio_t = _bytes_to_f32_mono_tensor(state.pcm, device).contiguous()
         length_t = torch.tensor([audio_t.shape[1]], device=device, dtype=torch.int64)
@@ -202,6 +233,7 @@ async def finalize(state: StreamState) -> str:
                 proc, proc_len = model.preprocessor(input_signal=audio_t, length=length_t)
                 enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
                 # Guard tiny tail
+                hyps = None
                 if int(enc_len[0]) >= 2:
                     hyps = model.decoding.rnnt_decoder_predictions_tensor(
                         encoder_output=enc,
@@ -209,8 +241,9 @@ async def finalize(state: StreamState) -> str:
                         return_hypotheses=True,
                         partial_hypotheses=[state.partial] if state.partial is not None else None,
                     )
-        
-        state.partial = hyps[0] if isinstance(hyps, (list, tuple)) else hyps
+
+        if hyps is not None:
+            state.partial = hyps[0] if isinstance(hyps, (list, tuple)) else hyps
     
     # Extract final text
     try:
