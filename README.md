@@ -17,7 +17,7 @@ Self-hosted Parakeet-TDT-0.6B-V3 streaming speech-to-text server built on the Ne
 
 ## One-Command Quickstart (non-Docker)
 ```bash
-./scripts/main.sh
+bash scripts/main.sh
 ```
 
 What happens:
@@ -35,7 +35,7 @@ tail -f logs/latest.log
 
 Stop the detached pipeline (and uvicorn) with:
 ```bash
-./scripts/stop.sh
+bash scripts/stop.sh
 ```
 
 `scripts/stop.sh` kills the PID stored in `.run.pid` or falls back to `pkill -f "uvicorn server:app"`.

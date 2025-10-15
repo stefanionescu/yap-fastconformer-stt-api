@@ -33,8 +33,13 @@ exec ./scripts/steps/05_run_server.sh
 "
 
 echo "[main] Launching detached setup. Log: $LOG_FILE"
-nohup bash -c "$CHAIN" >>"$LOG_FILE" 2>&1 < /dev/null &
+if command -v setsid >/dev/null 2>&1; then
+  setsid bash -c "$CHAIN" >>"$LOG_FILE" 2>&1 < /dev/null &
+else
+  nohup bash -c "$CHAIN" >>"$LOG_FILE" 2>&1 < /dev/null &
+fi
 PIPE_PID=$!
+disown "$PIPE_PID" 2>/dev/null || true
 
 echo "$PIPE_PID" > "$PID_FILE"
 
