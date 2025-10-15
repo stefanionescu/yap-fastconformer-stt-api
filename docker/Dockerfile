@@ -1,41 +1,36 @@
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu24.04
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    HF_HOME=/cache/hf \
-    TRANSFORMERS_OFFLINE=0 \
-    HF_HUB_ENABLE_HF_TRANSFER=1
+    PYTHONUNBUFFERED=1
+
+ARG MODEL_URL=https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip
+ARG MODEL_NAME=vosk-model-en-us-0.22-lgraph
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 python3.12-venv python3-pip \
-    ffmpeg libsndfile1 git ca-certificates build-essential \
+    python3 python3-pip python3-venv \
+    ffmpeg libsndfile1 git curl ca-certificates unzip \
     && rm -rf /var/lib/apt/lists/*
-
-RUN mkdir -p /cache/hf
 
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-COPY scripts /app/scripts
-RUN chmod +x /app/scripts/*.sh /app/scripts/steps/*.sh
+RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt
 
-RUN python3.12 -m venv /app/.venv \
-    && . /app/.venv/bin/activate \
-    && python -m pip install -U pip wheel setuptools \
-    && pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
-    && pip install -r /app/requirements.txt
+RUN mkdir -p /models/en /tmp/model && \
+    curl -L -o /tmp/model.zip "$MODEL_URL" && \
+    unzip -q /tmp/model.zip -d /tmp/model && \
+    mv "/tmp/model/$MODEL_NAME"/* /models/en/ && \
+    rm -rf /tmp/model /tmp/model.zip
 
 COPY server /app/server
 COPY tests /app/tests
 COPY samples /app/samples
-COPY docker/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
 
-ENV STEP_MS=240 \
-    RIGHT_CONTEXT_MS=160 \
-    MAX_INFLIGHT_STEPS=1 \
-    PATH="/app/.venv/bin:${PATH}"
+ENV MODEL_DIR=/models/en \
+    HOST=0.0.0.0 \
+    PORT=8000 \
+    CONCURRENCY=64 \
+    LOG_LEVEL=INFO
 
 EXPOSE 8000
-ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["python3", "-m", "server.ws_server"]

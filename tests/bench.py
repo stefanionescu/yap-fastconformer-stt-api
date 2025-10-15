@@ -12,8 +12,8 @@ from utils import SAMPLE_RATE, stream_session
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Synthetic concurrency bench for Parakeet streaming")
-    parser.add_argument("--url", default=os.getenv("WS", "ws://127.0.0.1:8000/ws"), help="WebSocket endpoint")
+    parser = argparse.ArgumentParser(description="Synthetic concurrency bench for the Vosk server")
+    parser.add_argument("--url", default=os.getenv("WS", "ws://127.0.0.1:8000"), help="WebSocket endpoint")
     parser.add_argument("--streams", type=int, default=32, help="Number of concurrent streams")
     parser.add_argument("--duration", type=int, default=30, help="Synthetic duration in seconds per stream")
     parser.add_argument("--frame-ms", type=int, default=20, help="Frame size in milliseconds")
