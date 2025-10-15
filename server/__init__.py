@@ -12,6 +12,7 @@ from fastapi.responses import PlainTextResponse
 from omegaconf import OmegaConf
 import torch
 import nemo.collections.asr as nemo_asr
+import nemo
 
 SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2
@@ -33,6 +34,7 @@ model.to(device)
 print(f"[device] {device}")
 model.eval()
 model.freeze()
+print(f"[nemo] {nemo.__version__}")
 
 # Configure RNNT decoding to exclude TDT duration tokens from text output
 _decoding_cfg = OmegaConf.create({
@@ -83,6 +85,14 @@ _decoding_cfg = OmegaConf.create({
     },
 })
 model.change_decoding_strategy(_decoding_cfg)
+
+# Set featurizer inference flags to avoid any training-time quirks
+try:
+    if hasattr(model, "preprocessor") and hasattr(model.preprocessor, "featurizer"):
+        model.preprocessor.featurizer.dither = 0.0
+        model.preprocessor.featurizer.pad_to = 0
+except Exception:
+    pass
 
 gpu_semaphore = asyncio.Semaphore(MAX_INFLIGHT_STEPS)
 
@@ -167,6 +177,8 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
             proc, proc_len = model.preprocessor(input_signal=audio_t, length=length_t)
             # encoder expects audio_signal and length
             enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
+            # RNNT decoder expects [B, T, C]; encoder returns [B, C, T]
+            enc = enc.transpose(1, 2).contiguous()
             out = model.decoding.rnnt_decoder_predictions_tensor(
                 enc,
                 enc_len,
@@ -176,12 +188,18 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
             hyps = out[0] if isinstance(out, tuple) else out
     hyp = hyps[0]
     state.partial = hyp
-
-    # Decode robustly from token IDs to avoid any issues with hyp.text for TDT
+    # Prefer NeMo's post-processed hyp.text for TDT; fallback to ids->text
     try:
-        text = model.tokenizer.ids_to_text(hyp.y_sequence.tolist())
+        text = hyp.text or model.tokenizer.ids_to_text(hyp.y_sequence.tolist())
     except Exception:
         text = hyp.text or ""
+    # Print encoder shape once for sanity
+    if not hasattr(state, "_dbg_printed_enc_shape"):
+        try:
+            print(f"[dbg] enc.shape={tuple(enc.shape)} len0={int(enc_len[0])}")
+        except Exception:
+            pass
+        state._dbg_printed_enc_shape = True
     delta: Optional[str] = None
     if len(text) >= len(state.last_text) + MIN_EMIT_CHARS:
         delta = text[len(state.last_text) :]
@@ -201,7 +219,7 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
 def flush_final(state: StreamState) -> str:
     if state.partial:
         try:
-            final_text = model.tokenizer.ids_to_text(state.partial.y_sequence.tolist())
+            final_text = state.partial.text or model.tokenizer.ids_to_text(state.partial.y_sequence.tolist())
         except Exception:
             final_text = state.partial.text or ""
     else:
@@ -224,6 +242,8 @@ async def finalize(state: StreamState) -> str:
             with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
                 proc, proc_len = model.preprocessor(input_signal=audio_t, length=length_t)
                 enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
+                # RNNT decoder expects [B, T, C]; encoder returns [B, C, T]
+                enc = enc.transpose(1, 2).contiguous()
                 out = model.decoding.rnnt_decoder_predictions_tensor(
                     enc,
                     enc_len,
@@ -235,7 +255,7 @@ async def finalize(state: StreamState) -> str:
 
     if state.partial:
         try:
-            final = model.tokenizer.ids_to_text(state.partial.y_sequence.tolist())
+            final = state.partial.text or model.tokenizer.ids_to_text(state.partial.y_sequence.tolist())
         except Exception:
             final = state.partial.text or ""
     else:
