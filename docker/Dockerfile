@@ -37,5 +37,5 @@ ENV STEP_MS=240 \
     MAX_INFLIGHT_STEPS=1 \
     PATH="/app/.venv/bin:${PATH}"
 
-EXPOSE 8080
+EXPOSE 8000
 ENTRYPOINT ["/app/entrypoint.sh"]

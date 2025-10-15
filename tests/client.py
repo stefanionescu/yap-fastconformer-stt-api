@@ -158,7 +158,7 @@ async def stream_session(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Parakeet streaming smoke test")
-    parser.add_argument("--url", default=os.getenv("WS", "ws://127.0.0.1:8080/ws"), help="WebSocket endpoint")
+    parser.add_argument("--url", default=os.getenv("WS", "ws://127.0.0.1:8000/ws"), help="WebSocket endpoint")
     parser.add_argument("--file", default="mid.wav", help="Audio file (absolute path or under samples/)")
     parser.add_argument("--rtf", type=float, default=1.0, help="Real-time factor (1.0 = real-time)")
     parser.add_argument("--frame-ms", type=int, default=20, help="Frame size in milliseconds")

@@ -26,7 +26,7 @@ What happens:
 3. `scripts/02_python_env.sh` creates `.venv` and upgrades `pip`, `wheel`, `setuptools`.
 4. `scripts/03_python_deps.sh` installs CUDA 12.1 PyTorch 2.4.0 wheels and Python dependencies from `requirements.txt`.
 5. `scripts/04_prefetch_model.sh` caches `nvidia/parakeet-tdt-0.6b-v3` via `huggingface_hub`.
-6. `scripts/05_run_server.sh` activates `.venv` and execs `uvicorn server:app` on `0.0.0.0:8080`.
+6. `scripts/05_run_server.sh` activates `.venv` and execs `uvicorn server:app` on `0.0.0.0:8000`.
 
 All stdout/stderr is appended to `logs/run_<timestamp>.log` with a symlink at `logs/latest.log`. `scripts/main.sh` automatically tails the log after launching; hit `Ctrl+C` to drop the tail — the background process keeps running. Logs are still available via:
 ```bash
@@ -58,7 +58,7 @@ Override before invoking `./scripts/main.sh` (or export globally):
 - `scripts/steps/05_run_server.sh` — activates `.venv` and launches `uvicorn`
 
 ## WebSocket Protocol
-Endpoint: `ws://<host>:8080/ws`
+Endpoint: `ws://<host>:8000/ws`
 
 - Stream raw PCM16 mono audio at 16 kHz in any chunk size (20 ms suggested).
 - After the final audio frame, send the control frame `b"__CTRL__:EOS"` to flush the final transcript immediately.
@@ -82,7 +82,7 @@ All clients assume `.venv` is active (`source .venv/bin/activate`) or you run vi
 
 ### Concurrency benchmark
 ```bash
-./.venv/bin/python tests/bench.py --url ws://127.0.0.1:8080/ws --streams 64 --duration 30
+./.venv/bin/python tests/bench.py --url ws://127.0.0.1:8000/ws --streams 64 --duration 30
 ```
 
 ### Standalone utilities
@@ -94,8 +94,8 @@ All clients assume `.venv` is active (`source .venv/bin/activate`) or you run vi
 # Build the image (parakeet-tdt-streaming:latest)
 bash docker/build.sh
 
-# Run with GPU access, publishing port 8080
-PORT=8080 bash docker/run.sh
+# Run with GPU access, publishing port 8000
+PORT=8000 bash docker/run.sh
 ```
 
 The Dockerfile mirrors the host workflow: it installs Python 3.12, creates `/app/.venv`, installs CUDA 12.1 PyTorch wheels plus requirements, and launches `scripts/05_run_server.sh` as the container entrypoint. Default env vars inside the container:
@@ -107,7 +107,7 @@ The Dockerfile mirrors the host workflow: it installs Python 3.12, creates `/app
 Need to preseed the Hugging Face cache or reuse GPUs across runs? Mount a host directory:
 ```bash
 docker run --rm -it --gpus all \
-  -p 8080:8080 \
+  -p 8000:8000 \
   -v /path/to/hf-cache:/cache/hf \
   parakeet-tdt-streaming:latest
 ```

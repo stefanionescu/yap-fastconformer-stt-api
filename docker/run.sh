@@ -3,11 +3,11 @@ set -euo pipefail
 
 IMAGE_NAME="${IMAGE_NAME:-parakeet-tdt-streaming}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
-PORT="${PORT:-8080}"
+PORT="${PORT:-8000}"
 
 exec docker run --rm -it \
   --gpus all \
-  -p "$PORT:8080" \
+  -p "$PORT:8000" \
   -e STEP_MS="${STEP_MS:-240}" \
   -e RIGHT_CONTEXT_MS="${RIGHT_CONTEXT_MS:-160}" \
   -e MAX_INFLIGHT_STEPS="${MAX_INFLIGHT_STEPS:-1}" \
