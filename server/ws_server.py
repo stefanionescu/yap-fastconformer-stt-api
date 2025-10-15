@@ -177,29 +177,23 @@ class VoskServer:
 
     @staticmethod
     def _build_punctuator(settings: Settings) -> Optional[Callable[[str], str]]:
-        """Create a punctuation function; raise if unavailable.
-
-        Returns a callable `fn(text) -> text_with_punct`.
-        """
+        """Create a punctuation function; returns fn(text)->punctuated_text or None."""
         if _so is None:
-            raise RuntimeError(
-                "sherpa-onnx is required for punctuation but is not importable. "
-                "Ensure 'sherpa-onnx' is installed and available."
-            )
+            # If you want "mandatory", raise here; otherwise return None to keep server alive.
+            # raise RuntimeError("sherpa-onnx not importable")
+            return None
+        model_file = settings.punct_dir / "model.onnx"
+        vocab_file = settings.punct_dir / "bpe.vocab"
+        if not model_file.exists() or not vocab_file.exists():
+            LOGGER.error("Punct files missing in %s (need model.onnx + bpe.vocab)", settings.punct_dir)
+            return None
+        model_path = model_file.as_posix()
+        vocab_path = vocab_file.as_posix()
         try:
-            model_file = settings.punct_dir / "model.onnx"
-            vocab_file = settings.punct_dir / "bpe.vocab"
-            if not model_file.exists() or not vocab_file.exists():
-                raise FileNotFoundError(
-                    f"Punctuation model files not found in {settings.punct_dir}. "
-                    "Expected 'model.onnx' and 'bpe.vocab'."
-                )
-            model_path = model_file.as_posix()
-            vocab_path = vocab_file.as_posix()
-            # Prefer the newer config API when available
-            if hasattr(_so, "OnlinePunctuationConfig"):
+            # Preferred (newer) API shape: OnlinePunctuationConfig(model_config=OnlinePunctuationModelConfig(...))
+            if hasattr(_so, "OnlinePunctuationConfig") and hasattr(_so, "OnlinePunctuationModelConfig"):
                 cfg = _so.OnlinePunctuationConfig(
-                    model=_so.OnlinePunctuationModelConfig(
+                    model_config=_so.OnlinePunctuationModelConfig(
                         cnn_bilstm=model_path,
                         bpe_vocab=vocab_path,
                         provider="cpu",
@@ -210,6 +204,7 @@ class VoskServer:
                 punct = _so.OnlinePunctuation(cfg)
 
                 def _fn(text: str) -> str:
+                    # method name varies by wheel; try in order
                     if hasattr(punct, "add_punctuations"):
                         return punct.add_punctuations(text)
                     if hasattr(punct, "AddPunctuations"):
@@ -224,7 +219,7 @@ class VoskServer:
                     settings.punct_dir,
                 )
                 return _fn
-            # Older wheels: flat kwargs
+            # Older wheels: flat-kwargs constructor
             punct = _so.OnlinePunctuation(
                 cnn_bilstm=model_path,
                 bpe_vocab=vocab_path,
@@ -232,14 +227,14 @@ class VoskServer:
                 num_threads=settings.punct_threads,
             )
             LOGGER.info(
-                "Online punctuation enabled (threads=%d, dir=%s)",
+                "Online punctuation enabled (legacy API, threads=%d, dir=%s)",
                 settings.punct_threads,
                 settings.punct_dir,
             )
             return lambda s: getattr(punct, "process", lambda x: x)(s)
         except Exception:
-            LOGGER.exception("Failed to initialize punctuation")
-            raise
+            LOGGER.exception("Failed to initialize punctuation; continuing without it")
+            return None
 
 
 async def main() -> None:

@@ -1,3 +1,4 @@
+tests/client.py
 .venv/
 scripts/**
 logs/**

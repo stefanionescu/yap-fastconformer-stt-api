@@ -96,7 +96,7 @@ The server initializes the GPU path at startup via `GpuInit()` before loading th
 Connections stay open until the client closes them or the server receives `EOS`.
 
 ## Client Utilities
-Install the Python requirements locally (or reuse the Docker container):
+Install the Python requirements locally:
 
 ```bash
 python3 -m venv .venv
@@ -110,6 +110,30 @@ Then use the helper scripts under `tests/`:
 - `tests/bench.py` – synthetic concurrency benchmark (sine wave generator)
 
 Each tool honours the `--url` flag (default `ws://127.0.0.1:8000`). Audio samples live under `samples/`.
+
+### Quick Python commands
+
+Run these from the repo root after installing requirements (server must be running somewhere).
+
+```bash
+# Smoke test against local server
+python3 tests/client.py --file mid.wav --full-text
+
+# Warmup (local server, show partials, faster send)
+python3 tests/warmup.py --file realistic.mp3 --rtf 10 --frame-ms 20 --print-partials
+
+# Bench: 32 concurrent synthetic streams for 30s
+python3 tests/bench.py --streams 32 --duration 30 --rtf 1.0
+
+# Point to a remote server explicitly
+python3 tests/warmup.py --url ws://your-host:8000 --file mid.wav
+
+# Or use the WS env var instead of --url
+WS=ws://your-host:8000 python3 tests/bench.py --streams 64
+
+# Use an absolute audio path
+python3 tests/warmup.py --file /abs/path/to/audio.wav --full-text
+```
 
 ## Development Notes
 - The runtime automatically installs `uvloop` when available; fallbacks to asyncio otherwise
