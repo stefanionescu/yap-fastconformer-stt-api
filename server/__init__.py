@@ -68,7 +68,7 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
 
     async with gpu_semaphore:
         hyps = model.transcribe(
-            audio_list=[audio],
+            audio=[audio],
             batch_size=1,
             return_hypotheses=True,
             partial_hypothesis=[state.partial] if state.partial is not None else None,
@@ -100,7 +100,7 @@ async def finalize(state: StreamState) -> str:
         audio = np.frombuffer(state.pcm, dtype=np.int16).astype(np.float32)
         async with gpu_semaphore:
             hyps = model.transcribe(
-                audio_list=[audio],
+                audio=[audio],
                 batch_size=1,
                 return_hypotheses=True,
                 partial_hypothesis=[state.partial] if state.partial else None,
@@ -123,7 +123,7 @@ def _warmup() -> None:
     # Send a short zero buffer to initialize CUDA graphs and JIT paths
     x = np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.int16).astype(np.float32)
     try:
-        model.transcribe(audio_list=[x], batch_size=1, return_hypotheses=False)
+        model.transcribe(audio=[x], batch_size=1, return_hypotheses=False)
     except Exception:
         # Warmup is best-effort and should not block startup
         pass
