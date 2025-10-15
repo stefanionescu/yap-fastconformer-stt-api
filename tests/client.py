@@ -72,6 +72,15 @@ def _chunk_audio(audio: np.ndarray, samples_per_chunk: int) -> Iterable[np.ndarr
         yield audio[start : start + samples_per_chunk]
 
 
+def _to_s16le_bytes(frame: np.ndarray) -> bytes:
+    """Convert a numpy audio frame (int16 or float) to little-endian int16 bytes."""
+    if frame.dtype == np.int16:
+        return frame.astype("<i2", copy=False).tobytes()
+    # Assume float-like [-1, 1]
+    f = np.clip(frame.astype(np.float32, copy=False), -1.0, 1.0)
+    return (f * 32767.0).astype("<i2").tobytes()
+
+
 async def stream_session(
     url: str,
     audio: np.ndarray,
@@ -97,7 +106,7 @@ async def stream_session(
             for frame in _chunk_audio(audio, samples_per_chunk):
                 if frame.size == 0:
                     continue
-                await ws.send(frame.tobytes())
+                await ws.send(_to_s16le_bytes(frame))
                 if first_audio_ts is None:
                     first_audio_ts = time.perf_counter()
                 sent_samples += int(frame.size)

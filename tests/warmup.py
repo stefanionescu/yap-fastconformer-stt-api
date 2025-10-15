@@ -35,6 +35,13 @@ async def run_once(args: argparse.Namespace) -> int:
         print(f"Audio not found: {audio_path}")
         return 2
     audio = load_audio(audio_path)
+    # Ensure contiguous int16 for consistent wire format (s16le)
+    if audio.dtype != "int16":
+        import numpy as np  # local import to avoid global dependency here
+        audio = np.clip(audio.astype("float32", copy=False), -1.0, 1.0)
+        audio = (audio * 32767.0).astype("int16")
+    else:
+        audio = audio.astype("int16", copy=False)
     duration = len(audio) / SAMPLE_RATE
     result = await stream_session(
         args.url,

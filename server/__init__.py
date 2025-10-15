@@ -71,6 +71,21 @@ def _bytes_per_window(step_ms: int) -> int:
     return int(SAMPLE_RATE * (step_ms / 1000.0)) * BYTES_PER_SAMPLE
 
 
+ASCII_RANGES = tuple(range(9, 14)) + (32,)
+
+
+def _looks_like_text(buf: bytes) -> bool:
+    if not buf:
+        return False
+    printable = sum((32 <= b < 127) or (b in ASCII_RANGES) for b in buf)
+    return (printable / len(buf)) > 0.9
+
+
+def _frame_ok(n: int) -> bool:
+    # accept either s16 (2-byte) or f32 (4-byte) frames
+    return (n % 2 == 0) or (n % 4 == 0)
+
+
 def _bytes_to_f32_mono_tensor(buf: bytes, device: torch.device) -> torch.Tensor:
     """
     Decode either s16le or f32le PCM chunk into a 1xT float32 tensor in [-1, 1].
@@ -215,6 +230,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     flush_final(state)
                     await ws.send_text(json.dumps({"type": "reset"}))
                 continue
+
+            if _looks_like_text(msg) or not _frame_ok(len(msg)):
+                try:
+                    await ws.close(code=1003, reason="Non-PCM payload")
+                finally:
+                    return
 
             state.pcm.extend(msg)
             delta = await rnnt_step(state)

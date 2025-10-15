@@ -34,7 +34,7 @@ def synth(duration: int) -> np.ndarray:
 
 
 async def run(args: argparse.Namespace) -> None:
-    audio = synth(args.duration)
+    audio = synth(args.duration).astype(np.int16, copy=False)
 
     async def session() -> None:
         await stream_session(
