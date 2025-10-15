@@ -276,6 +276,7 @@ def _warmup() -> None:
                 encoder_output=enc,
                 encoded_lengths=enc_len,
                 return_hypotheses=True,
+                partial_hypotheses=None,
             )
         print("[warmup] Complete")
     except Exception as e:
