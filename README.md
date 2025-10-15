@@ -1,9 +1,9 @@
-# Vosk GPU Streaming ASR Server
+# Yap Vosk GPU Streaming ASR Server
 
-GPU-accelerated speech-to-text server built around Vosk (Kaldi + CUDA bindings). Audio arrives over a bare WebSocket connection, partial hypotheses stream in real time, and the final transcript flushes as soon as the client emits an `__CTRL__:EOS` control frame.
+GPU-accelerated speech-to-text server built around Vosk (Kaldi + CUDA bindings). Audio arrives over a WebSocket connection, partial hypotheses stream in real time, and the final transcript flushes as soon as the client emits an `__CTRL__:EOS` control frame.
 
 ## Highlights
-- Vosk CUDA decoder with the `vosk-model-en-us-0.22-lgraph` English pack baked into the container
+- Vosk CUDA decoder with the `vosk-model-en-us-0.22` English pack baked into the container
 - Binary WebSocket protocol (`s16le` mono 16 kHz) with partial + final JSON messages
 - Stateless asyncio server that supports dozens of concurrent sessions (`CONCURRENCY` env)
 - Minimal runtime footprint: Python 3.10, websockets, numpy, soundfile, uvloop
