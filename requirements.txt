@@ -8,3 +8,4 @@ pydub==0.25.1
 huggingface_hub[hf-xet]==0.31.2
 hf_transfer==0.1.9
 numpy<2
+cuda-python>=12.3

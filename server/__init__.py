@@ -10,6 +10,10 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from omegaconf import OmegaConf
+from nemo.collections.asr.parts.submodules.transducer_decoding.label_looping_base import (
+    GreedyBatchedLabelLoopingComputerBase,
+)
+from nemo.collections.asr.parts.utils.rnnt_utils import batched_hyps_to_hypotheses
 import torch
 import nemo.collections.asr as nemo_asr
 import nemo
@@ -39,18 +43,22 @@ model.eval()
 model.freeze()
 print(f"[nemo] {nemo.__version__}")
 
-# Configure RNNT decoding - simplified for better reliability
+# Configure RNNT decoding - label-looping stateful greedy
 _decoding_cfg = OmegaConf.create({
-    "strategy": "greedy",
+    "strategy": "greedy_batch",
     "preserve_alignments": False,
-    "preserve_frame_confidence": False,
     "compute_timestamps": False,
+    "fused_batch_size": -1,
     "greedy": {
+        "loop_labels": True,
         "max_symbols_per_step": 10,
         "use_cuda_graph_decoder": True,
     },
 })
 model.change_decoding_strategy(_decoding_cfg)
+
+# one-time handle to the decoder computer
+decoding_computer: GreedyBatchedLabelLoopingComputerBase = model.decoding.decoding.decoding_computer  # type: ignore
 
 # Set featurizer inference flags to avoid any training-time quirks
 try:
@@ -86,12 +94,16 @@ def _align_samples(req_ms: int) -> int:
     k = max(1, (req_samples + hop - 1) // hop)  # ceil to >=1 hop
     return k * hop
 
-# Aim for ~120 ms chunk (≈3 hops) and ~120 ms right context (≈3 hops)
-CHUNK_SAMPLES = _align_samples(max(STEP_MS, int(3 * ENC_HOP_MS)))
-RC_SAMPLES = _align_samples(max(RIGHT_CONTEXT_MS, int(3 * ENC_HOP_MS)))
+# Force 1-hop chunk and 1-hop right-context to minimize commit latency
+CHUNK_SAMPLES = ENC_HOP_SAMPLES
+RC_SAMPLES = ENC_HOP_SAMPLES
 
 CHUNK_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
 RC_BYTES = RC_SAMPLES * BYTES_PER_SAMPLE
+
+# Derive frame counts for decoder
+CHUNK_FRAMES = max(1, CHUNK_SAMPLES // ENC_HOP_SAMPLES)
+RC_FRAMES = max(1, RC_SAMPLES // ENC_HOP_SAMPLES)
 
 print(f"[stream] enc_hop≈{ENC_HOP_MS:.1f} ms  chunk={CHUNK_SAMPLES/SR*1000:.1f} ms  right={RC_SAMPLES/SR*1000:.1f} ms")
 
@@ -99,13 +111,15 @@ print(f"[stream] enc_hop≈{ENC_HOP_MS:.1f} ms  chunk={CHUNK_SAMPLES/SR*1000:.1f
 @dataclass
 class StreamState:
     pcm: bytearray
-    partial: Optional[object]
     last_text: str
+    dec_state: Optional[object]
+    hyps: Optional[object]
 
     def __init__(self) -> None:
         self.pcm = bytearray()
-        self.partial = None
         self.last_text = ""
+        self.dec_state = None
+        self.hyps = None
 
 
 MAX_DEBUG_STEPS = int(os.getenv("DEBUG_STEPS", "8"))
@@ -151,109 +165,93 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
             with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
                 proc, proc_len = model.preprocessor(input_signal=audio_t, length=length_t)
                 enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
+                enc_bt = enc.transpose(1, 2).contiguous()  # [B, T, C]
 
                 if getattr(state, "_dbg_seen", 0) == 0:
                     print(f"[dbg] enc.shape={tuple(enc.shape)} enc_len={int(enc_len[0].item())}")
 
-                t_enc = int(enc_len[0].item())
-                if t_enc < 2:
-                    # Not enough frames; wait for more audio
+                T = int(enc_len[0].item())
+                if T < (CHUNK_FRAMES + RC_FRAMES):
                     break
 
-                hyps = model.decoding.rnnt_decoder_predictions_tensor(
-                    encoder_output=enc,
-                    encoded_lengths=enc_len,
-                    return_hypotheses=True,
-                    partial_hypotheses=[state.partial] if state.partial is not None else None,
+                # decode only the CHUNK frames, exclude right-context
+                decode_bt = enc_bt[:, : T - RC_FRAMES, :]
+                out_len = torch.tensor([CHUNK_FRAMES], device=device, dtype=torch.int64)
+
+                chunk_bhyps, _, state.dec_state = decoding_computer(
+                    x=decode_bt, out_len=out_len, prev_batched_state=state.dec_state
                 )
 
-        hyp = hyps[0] if isinstance(hyps, (list, tuple)) else hyps
-        state.partial = hyp
+                if state.hyps is None:
+                    state.hyps = chunk_bhyps
+                else:
+                    state.hyps.merge_(chunk_bhyps)
 
-        try:
-            text = hyp.text if hasattr(hyp, 'text') else ""
-            if not text and hasattr(hyp, 'y_sequence'):
-                text = model.tokenizer.ids_to_text(hyp.y_sequence.tolist())
-        except Exception as e:
-            print(f"[error] extracting text: {e}")
-            text = ""
+        # Convert running BatchedHyps -> text and emit delta
+        hyp_list = batched_hyps_to_hypotheses(state.hyps, None, batch_size=1) if state.hyps is not None else []
+        text = model.tokenizer.ids_to_text(hyp_list[0].y_sequence.tolist()) if hyp_list else ""
 
-        delta: Optional[str] = None
         if len(text) >= len(state.last_text) + MIN_EMIT_CHARS:
             delta = text[len(state.last_text):]
             state.last_text = text
+            emitted = (emitted or "") + delta
             if getattr(state, "_dbg_seen", 0) < MAX_DEBUG_STEPS:
                 print(f"[step] delta='{delta[:40]}' total_len={len(text)}")
 
         state._dbg_seen = getattr(state, "_dbg_seen", 0) + 1
+        # slide exactly one chunk; keep RC in buffer
         del state.pcm[:CHUNK_BYTES]
-        if delta:
-            emitted = (emitted or "") + delta
 
     return emitted
 
 
 def flush_final(state: StreamState) -> str:
-    if state.partial:
-        try:
-            final_text = state.partial.text or model.tokenizer.ids_to_text(state.partial.y_sequence.tolist())
-        except Exception:
-            final_text = state.partial.text or ""
-    else:
-        final_text = ""
+    text = ""
+    if state.hyps is not None:
+        hyp_list = batched_hyps_to_hypotheses(state.hyps, None, batch_size=1)
+        text = model.tokenizer.ids_to_text(hyp_list[0].y_sequence.tolist())
     state.pcm.clear()
-    state.partial = None
+    state.dec_state = None
+    state.hyps = None
     state.last_text = ""
-    return final_text
+    return text
 
 
 async def finalize(state: StreamState) -> str:
-    if len(state.pcm) == 0 and state.partial:
-        # No more audio, just return what we have
-        try:
-            return state.partial.text or ""
-        except:
-            return ""
-    
     if len(state.pcm) > 0:
-        # Pad with ≥ right context, aligned
-        PAD_BYTES = RC_BYTES
-        state.pcm.extend(b"\x00" * PAD_BYTES)
-        
+        # pad right-context
+        state.pcm.extend(b"\x00" * RC_BYTES)
         audio_t = _bytes_to_f32_mono_tensor(state.pcm, device).contiguous()
         length_t = torch.tensor([audio_t.shape[1]], device=device, dtype=torch.int64)
-        
+
         async with gpu_semaphore:
             with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
                 proc, proc_len = model.preprocessor(input_signal=audio_t, length=length_t)
                 enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
-                # Guard tiny tail
-                hyps = None
-                if int(enc_len[0].item()) >= 2:
-                    hyps = model.decoding.rnnt_decoder_predictions_tensor(
-                        encoder_output=enc,
-                        encoded_lengths=enc_len,
-                        return_hypotheses=True,
-                        partial_hypotheses=[state.partial] if state.partial is not None else None,
+                enc_bt = enc.transpose(1, 2).contiguous()
+                T = int(enc_len[0].item())
+                if T > RC_FRAMES:
+                    decode_bt = enc_bt[:, : T - RC_FRAMES, :]
+                    out_len = torch.tensor([T - RC_FRAMES], device=device, dtype=torch.int64)
+                    chunk_bhyps, _, state.dec_state = decoding_computer(
+                        x=decode_bt, out_len=out_len, prev_batched_state=state.dec_state
                     )
+                    if state.hyps is None:
+                        state.hyps = chunk_bhyps
+                    else:
+                        state.hyps.merge_(chunk_bhyps)
 
-        if hyps is not None:
-            state.partial = hyps[0] if isinstance(hyps, (list, tuple)) else hyps
-    
-    # Extract final text
-    try:
-        final = state.partial.text if state.partial else ""
-        if not final and state.partial and hasattr(state.partial, 'y_sequence'):
-            final = model.tokenizer.ids_to_text(state.partial.y_sequence.tolist())
-    except Exception as e:
-        print(f"[error] finalizing: {e}")
-        final = ""
-    
-    # Reset state
+    text = ""
+    if state.hyps is not None:
+        hyp_list = batched_hyps_to_hypotheses(state.hyps, None, batch_size=1)
+        text = model.tokenizer.ids_to_text(hyp_list[0].y_sequence.tolist())
+
+    # reset
     state.pcm.clear()
-    state.partial = None
+    state.dec_state = None
+    state.hyps = None
     state.last_text = ""
-    return final
+    return text
 
 
 app = FastAPI()
@@ -268,13 +266,13 @@ def _warmup() -> None:
             
             proc, proc_len = model.preprocessor(input_signal=x, length=length_t)
             enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
-            
+            enc_bt = enc.transpose(1, 2).contiguous()
+
             print(f"[warmup] enc.shape={tuple(enc.shape)}")
-            
-            _ = model.decoding.rnnt_decoder_predictions_tensor(
-                encoder_output=enc,
-                encoded_lengths=enc_len,
-                return_hypotheses=False,
+
+            # one tiny LL step to build kernels
+            _ = decoding_computer(
+                x=enc_bt[:, :1, :], out_len=torch.tensor([1], device=device), prev_batched_state=None
             )
         print(f"[warmup] hop={ENC_HOP_MS:.1f}ms chunk={CHUNK_SAMPLES/SR*1000:.1f}ms rc={RC_SAMPLES/SR*1000:.1f}ms")
         print("[warmup] Complete")
@@ -319,7 +317,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 await ws.send_text(json.dumps({"type": "partial", "text": delta}))
 
     except WebSocketDisconnect:
-        if state.partial or len(state.pcm) > 0:
+        if state.hyps is not None or len(state.pcm) > 0:
             final = await finalize(state)
             try:
                 await ws.send_text(json.dumps({"type": "final", "text": final}))
