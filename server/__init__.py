@@ -71,6 +71,34 @@ def _bytes_per_window(step_ms: int) -> int:
     return int(SAMPLE_RATE * (step_ms / 1000.0)) * BYTES_PER_SAMPLE
 
 
+def _bytes_to_f32_mono_tensor(buf: bytes, device: torch.device) -> torch.Tensor:
+    """
+    Decode either s16le or f32le PCM chunk into a 1xT float32 tensor in [-1, 1].
+    Heuristics:
+      * Prefer s16 if buf length divisible by 2 and s16 RMS > tiny.
+      * If buf length divisible by 4 and s16 looks like silence, treat as f32.
+    """
+    n = len(buf)
+    as_f32 = False
+    looks_f32 = (n % 4) == 0
+
+    audio_i16 = np.frombuffer(buf, dtype=np.int16)
+    if audio_i16.size > 0:
+        rms_i16 = float(np.sqrt((audio_i16.astype(np.float64) ** 2).mean() + 1e-12))
+        if looks_f32 and rms_i16 <= 2.0:
+            as_f32 = True
+    else:
+        as_f32 = looks_f32
+
+    if not as_f32:
+        audio = (audio_i16.astype(np.float32) / 32768.0)
+    else:
+        audio = np.frombuffer(buf, dtype=np.float32)
+        np.clip(audio, -1.0, 1.0, out=audio)
+
+    return torch.from_numpy(audio.copy()).to(device=device, dtype=torch.float32).unsqueeze(0)
+
+
 async def rnnt_step(state: StreamState) -> Optional[str]:
     needed = _bytes_per_window(STEP_MS)
     if len(state.pcm) < needed:
@@ -78,14 +106,11 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
 
     rc_bytes = _bytes_per_window(RIGHT_CONTEXT_MS)
     window = state.pcm[: needed + rc_bytes]
-    audio_i16 = np.frombuffer(window, dtype=np.int16)
-    # Fast sanity: are we receiving non-zero audio?
-    if getattr(state, "_dbg_seen", 0) < MAX_DEBUG_STEPS:
-        rms = float(np.sqrt((audio_i16.astype(np.float64) ** 2).mean() + 1e-9))
-        print(f"[step] bytes={len(window)} i16.min={audio_i16.min()} i16.max={audio_i16.max()} i16.rms≈{rms:.1f}")
-    audio = (audio_i16.astype(np.float32) / 32768.0)
-    audio_t = torch.from_numpy(audio).to(device).unsqueeze(0).contiguous()
+    audio_t = _bytes_to_f32_mono_tensor(window, device).contiguous()
     length_t = torch.tensor([audio_t.shape[1]], device=device, dtype=torch.int64)
+    if getattr(state, "_dbg_seen", 0) < MAX_DEBUG_STEPS:
+        a = audio_t[0].detach().float().cpu().numpy()
+        print(f"[step] bytes={len(window)} f32.min={a.min():.3f} f32.max={a.max():.3f} f32.rms≈{float(np.sqrt((a*a).mean()+1e-12)):.3f}")
 
     async with gpu_semaphore:
         with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
@@ -129,8 +154,7 @@ async def finalize(state: StreamState) -> str:
         rc_bytes = _bytes_per_window(RIGHT_CONTEXT_MS)
         if rc_bytes > 0:
             state.pcm.extend(b"\x00" * rc_bytes)
-        audio = (np.frombuffer(state.pcm, dtype=np.int16).astype(np.float32) / 32768.0)
-        audio_t = torch.from_numpy(audio).to(device).unsqueeze(0).contiguous()
+        audio_t = _bytes_to_f32_mono_tensor(state.pcm, device).contiguous()
         length_t = torch.tensor([audio_t.shape[1]], device=device, dtype=torch.int64)
         async with gpu_semaphore:
             with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
