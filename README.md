@@ -7,6 +7,7 @@ GPU-accelerated speech-to-text server built around Vosk (Kaldi + CUDA bindings).
 - Binary WebSocket protocol (`s16le` mono 16 kHz) with partial + final JSON messages
 - Stateless asyncio server that supports dozens of concurrent sessions (`CONCURRENCY` env)
 - Minimal runtime footprint: Python 3.10, websockets, numpy, soundfile, uvloop
+- CPU punctuation + capitalization on finals using `sherpa-onnx` (partials remain raw)
 - Ready-to-run Docker image (`docker/Dockerfile`) for GPU deployment, plus lightweight CLI clients for smoke tests and benchmarks
 
 ## Quick Start (Docker)
@@ -78,6 +79,8 @@ All knobs are exposed via environment variables (same in Docker and bare-metal):
 - `ENABLE_WORD_TIMES` (`1`/`0`; default `1`)
 - `LOG_LEVEL` (default `INFO`)
 - `VOSK_LOG_LEVEL` (default `-1` → suppress Vosk debug output)
+- `PUNCT_DIR` (default `/models/punct/sherpa-onnx-online-punct-en-2024-08-06`) – directory of the punctuation model files
+- `PUNCT_THREADS` (default `1`) – CPU threads for punctuation; keep small
 
 The server initializes the GPU path at startup via `GpuInit()` before loading the model. If initialization fails, it logs a warning and continues (CPU path), but on the GPU base this should succeed when a CUDA device is present.
 
@@ -88,7 +91,7 @@ The server initializes the GPU path at startup via `GpuInit()` before loading th
 - Optional reset without reconnecting: `b"__CTRL__:RESET"`
 - JSON text frames streamed back:
   - Partial hypothesis: `{ "type": "partial", "text": "..." }`
-  - Final hypothesis: `{ "type": "final", "text": "..." }`
+  - Final hypothesis: `{ "type": "final", "text": "..." }` (punctuated/capitalized)
 
 Connections stay open until the client closes them or the server receives `EOS`.
 
@@ -112,6 +115,10 @@ Each tool honours the `--url` flag (default `ws://127.0.0.1:8000`). Audio sample
 - The runtime automatically installs `uvloop` when available; fallbacks to asyncio otherwise
 - Logging uses a simple `%(asctime)s %(levelname)s %(name)s: %(message)s` format for compatibility with structured collectors
 - The server is stateless; horizontal scale-out is achieved by running multiple containers behind your load balancer
+
+### Punctuation model
+
+We ship a tiny English online punctuation model from `sherpa-onnx` and run it on CPU. It post-processes final transcripts only, keeping partials ultra-low latency. To swap models or mount your own, bind a directory and point `PUNCT_DIR` at it.
 
 ## Troubleshooting
 - **`vosk.Model` fails to load** → ensure `MODEL_DIR` points at the unpacked model folder (the one containing `am`, `conf`, etc.) and that the Docker volume mount includes read permissions

@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from itertools import count
-from typing import Optional
+from typing import Optional, Callable
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -14,6 +14,12 @@ from websockets.server import WebSocketServerProtocol
 from vosk import KaldiRecognizer, Model, SetLogLevel, GpuInit
 
 from .settings import Settings
+
+# Mandatory punctuation (sherpa-onnx). Server fails fast if unavailable.
+try:
+    import sherpa_onnx as _so  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    _so = None
 
 CONTROL_PREFIX = "__CTRL__:"
 CTRL_EOS = "EOS"
@@ -73,6 +79,8 @@ class VoskServer:
         SetLogLevel(settings.vosk_log_level)
         LOGGER.info("Loading Vosk model from %s", settings.model_dir)
         self.model = Model(str(settings.model_dir))
+        # Build punctuation callable once per process
+        self._punctuate = self._build_punctuator(settings)
         self._semaphore = asyncio.Semaphore(settings.concurrency)
         self._session_ids = count(start=1)
 
@@ -158,8 +166,80 @@ class VoskServer:
     ) -> None:
         final_payload = _recognizer_final(recognizer)
         transcript = str(final_payload.get("text", "")).strip()
+        # Apply punctuation + capitalization only to finals
+        if transcript and self._punctuate is not None:
+            try:
+                transcript = self._punctuate(transcript)
+            except Exception:
+                LOGGER.exception("Punctuation failed; returning unpunctuated text")
         await websocket.send(json.dumps({"type": "final", "text": transcript}))
         LOGGER.debug("Client #%d final transcript length=%d", session_id, len(transcript))
+
+    @staticmethod
+    def _build_punctuator(settings: Settings) -> Optional[Callable[[str], str]]:
+        """Create a punctuation function; raise if unavailable.
+
+        Returns a callable `fn(text) -> text_with_punct`.
+        """
+        if _so is None:
+            raise RuntimeError(
+                "sherpa-onnx is required for punctuation but is not importable. "
+                "Ensure 'sherpa-onnx' is installed and available."
+            )
+        try:
+            model_file = settings.punct_dir / "model.onnx"
+            vocab_file = settings.punct_dir / "bpe.vocab"
+            if not model_file.exists() or not vocab_file.exists():
+                raise FileNotFoundError(
+                    f"Punctuation model files not found in {settings.punct_dir}. "
+                    "Expected 'model.onnx' and 'bpe.vocab'."
+                )
+            model_path = model_file.as_posix()
+            vocab_path = vocab_file.as_posix()
+            # Prefer the newer config API when available
+            if hasattr(_so, "OnlinePunctuationConfig"):
+                cfg = _so.OnlinePunctuationConfig(
+                    model=_so.OnlinePunctuationModelConfig(
+                        cnn_bilstm=model_path,
+                        bpe_vocab=vocab_path,
+                        provider="cpu",
+                        num_threads=settings.punct_threads,
+                        debug=False,
+                    )
+                )
+                punct = _so.OnlinePunctuation(cfg)
+
+                def _fn(text: str) -> str:
+                    if hasattr(punct, "add_punctuations"):
+                        return punct.add_punctuations(text)
+                    if hasattr(punct, "AddPunctuations"):
+                        return punct.AddPunctuations(text)
+                    if hasattr(punct, "process"):
+                        return punct.process(text)
+                    return text
+
+                LOGGER.info(
+                    "Online punctuation enabled (threads=%d, dir=%s)",
+                    settings.punct_threads,
+                    settings.punct_dir,
+                )
+                return _fn
+            # Older wheels: flat kwargs
+            punct = _so.OnlinePunctuation(
+                cnn_bilstm=model_path,
+                bpe_vocab=vocab_path,
+                provider="cpu",
+                num_threads=settings.punct_threads,
+            )
+            LOGGER.info(
+                "Online punctuation enabled (threads=%d, dir=%s)",
+                settings.punct_threads,
+                settings.punct_dir,
+            )
+            return lambda s: getattr(punct, "process", lambda x: x)(s)
+        except Exception:
+            LOGGER.exception("Failed to initialize punctuation")
+            raise
 
 
 async def main() -> None:

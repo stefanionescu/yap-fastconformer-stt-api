@@ -32,6 +32,10 @@ class Settings:
     enable_word_times: bool = True
     vosk_log_level: int = -1
     log_level: str = "INFO"
+    # Punctuation configuration (optional CPU-only post-processing)
+    enable_punct: bool = True
+    punct_dir: Path = Path("/models/punct/sherpa-onnx-online-punct-en-2024-08-06")
+    punct_threads: int = 1
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -44,6 +48,15 @@ class Settings:
         enable_word_times = _env_bool("ENABLE_WORD_TIMES", True)
         vosk_log_level = int(os.getenv("VOSK_LOG_LEVEL", "-1"))
         log_level = os.getenv("LOG_LEVEL", "INFO")
+        enable_punct = True
+        punct_dir = Path(
+            os.getenv(
+                "PUNCT_DIR",
+                "/models/punct/sherpa-onnx-online-punct-en-2024-08-06",
+            )
+        ).resolve()
+        punct_threads = max(1, int(os.getenv("PUNCT_THREADS", "1")))
+
         return cls(
             host=host,
             port=port,
@@ -54,4 +67,7 @@ class Settings:
             enable_word_times=enable_word_times,
             vosk_log_level=vosk_log_level,
             log_level=log_level,
+            enable_punct=enable_punct,
+            punct_dir=punct_dir,
+            punct_threads=punct_threads,
         )

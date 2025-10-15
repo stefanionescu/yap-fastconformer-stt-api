@@ -9,7 +9,7 @@ ARG MODEL_NAME=vosk-model-en-us-0.22
 # Base already contains CUDA-enabled libvosk; install runtime tools and Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv \
-    ffmpeg libsndfile1 git curl ca-certificates unzip \
+    ffmpeg libsndfile1 git curl ca-certificates unzip bzip2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -25,6 +25,13 @@ RUN mkdir -p /models/en /tmp/model && \
     mv "/tmp/model/$MODEL_NAME"/* /models/en/ && \
     rm -rf /tmp/model /tmp/model.zip
 
+# Optional: English punctuation model for sherpa-onnx (CPU)
+RUN mkdir -p /models/punct && \
+    curl -L -o /models/punct/punct.tar.bz2 \
+      https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-online-punct-en-2024-08-06.tar.bz2 && \
+    tar -C /models/punct -xjf /models/punct/punct.tar.bz2 && \
+    rm /models/punct/punct.tar.bz2
+
 COPY server /app/server
 COPY tests /app/tests
 COPY samples /app/samples
@@ -33,7 +40,9 @@ ENV MODEL_DIR=/models/en \
     HOST=0.0.0.0 \
     PORT=8000 \
     CONCURRENCY=64 \
-    LOG_LEVEL=INFO
+    LOG_LEVEL=INFO \
+    PUNCT_DIR=/models/punct/sherpa-onnx-online-punct-en-2024-08-06 \
+    PUNCT_THREADS=1
 
 EXPOSE 8000
 ENTRYPOINT []
