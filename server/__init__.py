@@ -39,11 +39,12 @@ print(f"[nemo] {nemo.__version__}")
 # Configure RNNT decoding to exclude TDT duration tokens from text output
 _decoding_cfg = OmegaConf.create({
     "model_type": "rnnt",
-    "strategy": "greedy",
+    "strategy": "greedy_batch",
     "compute_timestamps": False,
     "compute_hypothesis_token_set": False,
     "preserve_alignments": False,
     "rnnt_timestamp_type": "all",
+    "fused_batch_size": -1,
 
     # Ensure TDT duration symbols are not surfaced as text
     "durations": [0, 1, 2, 3, 4],
@@ -278,6 +279,8 @@ def _warmup() -> None:
             length_t = torch.tensor([x.shape[1]], device=device, dtype=torch.int64)
             proc, proc_len = model.preprocessor(input_signal=x, length=length_t)
             enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
+            # RNNT decoder expects [B, T, C]; encoder returns [B, C, T]
+            enc = enc.transpose(1, 2).contiguous()
             _ = model.decoding.rnnt_decoder_predictions_tensor(enc, enc_len, return_hypotheses=False)
     except Exception as e:
         print(f"[warmup] non-fatal: {e}")
