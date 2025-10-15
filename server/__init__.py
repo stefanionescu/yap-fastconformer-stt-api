@@ -31,6 +31,9 @@ model = nemo_asr.models.ASRModel.from_pretrained(
 )
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
 print(f"[device] {device}")
 model.eval()
 model.freeze()
@@ -62,14 +65,13 @@ gpu_semaphore = asyncio.Semaphore(MAX_INFLIGHT_STEPS)
 
 # --- Encoder hop and aligned sizes ---
 SR = SAMPLE_RATE
+assert int(model._cfg.preprocessor.sample_rate) == SAMPLE_RATE, "SR mismatch"
 try:
     stride_sec = float(model._cfg.preprocessor.window_stride)
 except Exception:
     stride_sec = 0.01  # sensible default
-try:
-    sub = int(getattr(model.encoder, "subsampling_factor", 4))
-except Exception:
-    sub = 4
+sub = int(getattr(model.encoder, "subsampling_factor", 0))
+assert hasattr(model.encoder, "subsampling_factor") and sub > 0
 
 features_frame2samples = int(SR * stride_sec)
 # Make divisible by subsampling factor (NeMo does this internally)
@@ -109,10 +111,6 @@ class StreamState:
 MAX_DEBUG_STEPS = int(os.getenv("DEBUG_STEPS", "8"))
 
 
-def _bytes_per_window(step_ms: int) -> int:
-    return int(SAMPLE_RATE * (step_ms / 1000.0)) * BYTES_PER_SAMPLE
-
-
 ASCII_RANGES = tuple(range(9, 14)) + (32,)
 
 
@@ -139,63 +137,60 @@ def _bytes_to_f32_mono_tensor(buf: bytes, device: torch.device) -> torch.Tensor:
 
 
 async def rnnt_step(state: StreamState) -> Optional[str]:
-    if len(state.pcm) < CHUNK_BYTES + RC_BYTES:
-        return None
+    emitted: Optional[str] = None
+    while len(state.pcm) >= CHUNK_BYTES + RC_BYTES:
+        window = state.pcm[: CHUNK_BYTES + RC_BYTES]
+        audio_t = _bytes_to_f32_mono_tensor(window, device).contiguous()
+        length_t = torch.tensor([audio_t.shape[1]], device=device, dtype=torch.int64)
 
-    window = state.pcm[: CHUNK_BYTES + RC_BYTES]
-    audio_t = _bytes_to_f32_mono_tensor(window, device).contiguous()
-    length_t = torch.tensor([audio_t.shape[1]], device=device, dtype=torch.int64)
-    
-    if getattr(state, "_dbg_seen", 0) < MAX_DEBUG_STEPS:
-        a = audio_t[0].detach().float().cpu().numpy()
-        print(f"[step] bytes={len(window)} f32.min={a.min():.3f} f32.max={a.max():.3f}")
-
-    async with gpu_semaphore:
-        with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
-            # Process audio through model
-            proc, proc_len = model.preprocessor(input_signal=audio_t, length=length_t)
-            enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
-            
-            # Debug original encoder output shape (decoder expects [B, D, T])
-            if getattr(state, "_dbg_seen", 0) == 0:
-                print(f"[dbg] enc.shape={tuple(enc.shape)} enc_len={int(enc_len[0])}")
-            
-            # Require ≥2 encoder frames before decoding; otherwise wait for more audio
-            if int(enc_len[0]) < 2:
-                return None
-
-            hyps = model.decoding.rnnt_decoder_predictions_tensor(
-                encoder_output=enc,
-                encoded_lengths=enc_len,
-                return_hypotheses=True,
-                partial_hypotheses=[state.partial] if state.partial is not None else None,
-            )
-            
-    # Extract hypothesis
-    hyp = hyps[0] if isinstance(hyps, (list, tuple)) else hyps
-    state.partial = hyp
-    
-    # Get text from hypothesis
-    try:
-        text = hyp.text if hasattr(hyp, 'text') else ""
-        if not text and hasattr(hyp, 'y_sequence'):
-            text = model.tokenizer.ids_to_text(hyp.y_sequence.tolist())
-    except Exception as e:
-        print(f"[error] extracting text: {e}")
-        text = ""
-    
-    # Emit delta
-    delta: Optional[str] = None
-    if len(text) >= len(state.last_text) + MIN_EMIT_CHARS:
-        delta = text[len(state.last_text):]
-        state.last_text = text
         if getattr(state, "_dbg_seen", 0) < MAX_DEBUG_STEPS:
-            print(f"[step] delta='{delta[:40]}' total_len={len(text)}")
-    
-    state._dbg_seen = getattr(state, "_dbg_seen", 0) + 1
-    # Slide by exactly one aligned chunk
-    del state.pcm[:CHUNK_BYTES]
-    return delta
+            a = audio_t[0].detach().float().cpu().numpy()
+            print(f"[step] bytes={len(window)} f32.min={a.min():.3f} f32.max={a.max():.3f}")
+
+        async with gpu_semaphore:
+            with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+                proc, proc_len = model.preprocessor(input_signal=audio_t, length=length_t)
+                enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
+
+                if getattr(state, "_dbg_seen", 0) == 0:
+                    print(f"[dbg] enc.shape={tuple(enc.shape)} enc_len={int(enc_len[0].item())}")
+
+                t_enc = int(enc_len[0].item())
+                if t_enc < 2:
+                    # Not enough frames; wait for more audio
+                    break
+
+                hyps = model.decoding.rnnt_decoder_predictions_tensor(
+                    encoder_output=enc,
+                    encoded_lengths=enc_len,
+                    return_hypotheses=True,
+                    partial_hypotheses=[state.partial] if state.partial is not None else None,
+                )
+
+        hyp = hyps[0] if isinstance(hyps, (list, tuple)) else hyps
+        state.partial = hyp
+
+        try:
+            text = hyp.text if hasattr(hyp, 'text') else ""
+            if not text and hasattr(hyp, 'y_sequence'):
+                text = model.tokenizer.ids_to_text(hyp.y_sequence.tolist())
+        except Exception as e:
+            print(f"[error] extracting text: {e}")
+            text = ""
+
+        delta: Optional[str] = None
+        if len(text) >= len(state.last_text) + MIN_EMIT_CHARS:
+            delta = text[len(state.last_text):]
+            state.last_text = text
+            if getattr(state, "_dbg_seen", 0) < MAX_DEBUG_STEPS:
+                print(f"[step] delta='{delta[:40]}' total_len={len(text)}")
+
+        state._dbg_seen = getattr(state, "_dbg_seen", 0) + 1
+        del state.pcm[:CHUNK_BYTES]
+        if delta:
+            emitted = (emitted or "") + delta
+
+    return emitted
 
 
 def flush_final(state: StreamState) -> str:
@@ -234,7 +229,7 @@ async def finalize(state: StreamState) -> str:
                 enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
                 # Guard tiny tail
                 hyps = None
-                if int(enc_len[0]) >= 2:
+                if int(enc_len[0].item()) >= 2:
                     hyps = model.decoding.rnnt_decoder_predictions_tensor(
                         encoder_output=enc,
                         encoded_lengths=enc_len,
@@ -281,6 +276,7 @@ def _warmup() -> None:
                 encoded_lengths=enc_len,
                 return_hypotheses=False,
             )
+        print(f"[warmup] hop={ENC_HOP_MS:.1f}ms chunk={CHUNK_SAMPLES/SR*1000:.1f}ms rc={RC_SAMPLES/SR*1000:.1f}ms")
         print("[warmup] Complete")
     except Exception as e:
         print(f"[warmup] Error: {e}")
