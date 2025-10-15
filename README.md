@@ -24,6 +24,16 @@ docker run --rm -it --gpus all \
   vosk-gpu-ws:latest
 ```
 
+### Build & push to your Docker Hub registry
+
+```bash
+export DOCKER_IMAGE=my-dockerhub-user/vosk-gpu-ws
+export DOCKER_TAG=prod        # optional, defaults to "latest"
+bash docker/publish.sh
+```
+
+The helper script wraps `docker build` and `docker push` so you can ship an image to any Docker Hub namespace. Override `MODEL_URL` / `MODEL_NAME` in the environment before running if you want to embed a different acoustic model.
+
 The server starts immediately after loading the Vosk model and listens on `ws://0.0.0.0:8000`.
 
 ### Deploying a different model

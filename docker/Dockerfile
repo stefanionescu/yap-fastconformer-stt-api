@@ -3,8 +3,8 @@ FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
 
-ARG MODEL_URL=https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip
-ARG MODEL_NAME=vosk-model-en-us-0.22-lgraph
+ARG MODEL_URL=https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip
+ARG MODEL_NAME=vosk-model-en-us-0.22
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv \
