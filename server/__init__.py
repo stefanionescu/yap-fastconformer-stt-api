@@ -16,9 +16,9 @@ import nemo
 
 SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2
-STEP_MS = int(os.getenv("STEP_MS", "40"))
-RIGHT_CONTEXT_MS = int(os.getenv("RIGHT_CONTEXT_MS", "160"))
-MIN_EMIT_CHARS = int(os.getenv("MIN_EMIT_CHARS", "1"))
+STEP_MS = int(os.getenv("STEP_MS", "240"))
+RIGHT_CONTEXT_MS = int(os.getenv("RIGHT_CONTEXT_MS", "400"))
+MIN_EMIT_CHARS = int(os.getenv("MIN_EMIT_CHARS", "2"))
 MAX_INFLIGHT_STEPS = int(os.getenv("MAX_INFLIGHT_STEPS", "4"))
 
 CONTROL_PREFIX = b"__CTRL__:"
