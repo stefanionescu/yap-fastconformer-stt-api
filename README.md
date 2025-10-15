@@ -38,7 +38,7 @@ Stop the detached pipeline (and uvicorn) with:
 bash scripts/stop.sh
 ```
 
-`scripts/stop.sh` kills the PID stored in `.run.pid` or falls back to `pkill -f "uvicorn server:app"`.
+`scripts/stop.sh` kills the PID stored in `.run.pid` (or falls back to `pkill -f "uvicorn server:app"`), then removes the `.venv` virtualenv, local Hugging Face caches, build artifacts, and all logs.
 
 ### Tuning knobs
 Override before invoking `./scripts/main.sh` (or export globally):
@@ -49,7 +49,7 @@ Override before invoking `./scripts/main.sh` (or export globally):
 
 ### Scripts overview
 - `scripts/main.sh` — orchestrates the full chain in the background, tails logs for you
-- `scripts/stop.sh` — stops the detached pipeline and preserves logs
+- `scripts/stop.sh` — stops the detached pipeline and purges the virtualenv, caches, and logs
 - `scripts/steps/00_env_check.sh` — sanity checks for GPU + Python 3.12
 - `scripts/steps/01_system_deps.sh` — apt dependencies (uses `sudo` if necessary)
 - `scripts/steps/02_python_env.sh` — virtualenv bootstrap and base tooling upgrade
