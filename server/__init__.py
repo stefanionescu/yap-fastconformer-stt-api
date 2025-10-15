@@ -10,7 +10,6 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from omegaconf import OmegaConf
-
 import torch
 import nemo.collections.asr as nemo_asr
 
@@ -26,10 +25,12 @@ CTRL_EOS = b"EOS"
 CTRL_RESET = b"RESET"
 
 print("Loading NeMo Parakeet-TDT-0.6b-v3 …")
-model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v3")
+model = nemo_asr.models.ASRModel.from_pretrained(
+    model_name="nvidia/parakeet-tdt-0.6b-v3"
+)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
-print(f"[device] torch_device={device} is_cuda={next(model.parameters()).is_cuda if hasattr(model,'parameters') else 'n/a'}")
+print(f"[device] {device}")
 model.eval()
 model.freeze()
 
@@ -82,16 +83,18 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
         rms = float(np.sqrt((audio_i16.astype(np.float64) ** 2).mean() + 1e-9))
         print(f"[step] bytes={len(window)} i16.min={audio_i16.min()} i16.max={audio_i16.max()} i16.rms≈{rms:.1f}")
     audio = (audio_i16.astype(np.float32) / 32768.0)
+    audio_t = torch.from_numpy(audio).to(device).unsqueeze(0)
 
-    async with gpu_semaphore:
-        hyps = model.transcribe(
-            audio=[audio],
-            batch_size=1,
+    async with gpu_semaphore, torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type=="cuda")):
+        proc, proc_len = model.preprocessor(input_signal=audio_t, length=torch.tensor([audio_t.shape[1]], device=device))
+        enc, enc_len = model.encoder(processed_signal=proc, processed_signal_length=proc_len)
+        best_hyp, _ = model.decoding.rnnt_decoder_predictions_tensor(
+            enc,
+            enc_len,
             return_hypotheses=True,
-            partial_hypothesis=[state.partial] if state.partial is not None else None,
-            num_workers=0,
+            partial_hypotheses=[state.partial] if state.partial is not None else None,
         )
-    hyp = hyps[0]
+    hyp = best_hyp[0]
     state.partial = hyp
 
     text = hyp.text or ""
@@ -122,15 +125,17 @@ async def finalize(state: StreamState) -> str:
         if rc_bytes > 0:
             state.pcm.extend(b"\x00" * rc_bytes)
         audio = (np.frombuffer(state.pcm, dtype=np.int16).astype(np.float32) / 32768.0)
-        async with gpu_semaphore:
-            hyps = model.transcribe(
-                audio=[audio],
-                batch_size=1,
+        audio_t = torch.from_numpy(audio).to(device).unsqueeze(0)
+        async with gpu_semaphore, torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type=="cuda")):
+            proc, proc_len = model.preprocessor(input_signal=audio_t, length=torch.tensor([audio_t.shape[1]], device=device))
+            enc, enc_len = model.encoder(processed_signal=proc, processed_signal_length=proc_len)
+            best_hyp, _ = model.decoding.rnnt_decoder_predictions_tensor(
+                enc,
+                enc_len,
                 return_hypotheses=True,
-                partial_hypothesis=[state.partial] if state.partial else None,
-                num_workers=0,
+                partial_hypotheses=[state.partial] if state.partial else None,
             )
-        state.partial = hyps[0]
+        state.partial = best_hyp[0]
 
     final = state.partial.text if state.partial else ""
     state.pcm.clear()
@@ -144,10 +149,13 @@ app = FastAPI()
 
 @app.on_event("startup")
 def _warmup() -> None:
-    # Build CUDA kernels and CUDA graph paths with a tiny zero buffer
-    x = np.zeros(int(0.25 * SAMPLE_RATE), dtype=np.float32)
+    # Build kernels + graph once with a tiny buffer
     try:
-        model.transcribe(audio=[x], batch_size=1, return_hypotheses=False, num_workers=0)
+        with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type=="cuda")):
+            x = torch.zeros(1, int(0.25 * SAMPLE_RATE), device=device, dtype=torch.float32)
+            proc, proc_len = model.preprocessor(input_signal=x, length=torch.tensor([x.shape[1]], device=device))
+            enc, enc_len = model.encoder(processed_signal=proc, processed_signal_length=proc_len)
+            _ = model.decoding.rnnt_decoder_predictions_tensor(enc, enc_len, return_hypotheses=False)
     except Exception as e:
         print(f"[warmup] non-fatal: {e}")
 
