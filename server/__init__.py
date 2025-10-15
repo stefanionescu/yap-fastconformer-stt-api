@@ -44,6 +44,7 @@ _decoding_cfg = OmegaConf.create({
     "compute_timestamps": False,
     "greedy": {
         "max_symbols_per_step": 10,
+        "use_cuda_graph_decoder": True,
     },
 })
 model.change_decoding_strategy(_decoding_cfg)
@@ -123,36 +124,21 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
             proc, proc_len = model.preprocessor(input_signal=audio_t, length=length_t)
             enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
             
-            # Debug original encoder output shape
+            # Debug original encoder output shape (decoder expects [B, D, T])
             if getattr(state, "_dbg_seen", 0) == 0:
                 print(f"[dbg] enc.shape={tuple(enc.shape)} enc_len={int(enc_len[0])}")
             
-            # CRITICAL FIX: Check if encoder output is [B, C, T] format
-            # NeMo Conformer/FastConformer outputs [B, C, T], decoder needs [B, T, C]
-            # We check if dim 1 looks like a feature dimension (typically 256-1024)
-            # and dim 2 looks like time frames (varies with audio length)
-            if enc.ndim == 3 and enc.shape[1] in range(128, 2048):
-                # Likely [B, C, T] format - transpose to [B, T, C]
-                enc = enc.transpose(1, 2).contiguous()
-                if getattr(state, "_dbg_seen", 0) == 0:
-                    print(f"[dbg] transposed to enc.shape={tuple(enc.shape)}")
-            
             # Use transcribe instead of direct decoder call for streaming
             # This handles the decoder state properly
-            if state.partial is None:
-                # First chunk - no previous state
-                hyps = model.decoding.rnnt_decoder_predictions_tensor(
-                    encoder_output=enc,
-                    encoded_lengths=enc_len,
-                    return_hypotheses=True,
-                )
+            # Tiny tail guard: need at least 2 frames before decoding
+            if int(enc_len[0]) < 2:
+                pass
             else:
-                # Continuing chunks - pass previous hypothesis
                 hyps = model.decoding.rnnt_decoder_predictions_tensor(
                     encoder_output=enc,
                     encoded_lengths=enc_len,
                     return_hypotheses=True,
-                    partial_hypotheses=[state.partial],
+                    partial_hypotheses=[state.partial] if state.partial is not None else None,
                 )
             
     # Extract hypothesis
@@ -204,9 +190,9 @@ async def finalize(state: StreamState) -> str:
             return ""
     
     if len(state.pcm) > 0:
-        # Pad with silence to flush remaining audio
-        rc_bytes = _bytes_per_window(RIGHT_CONTEXT_MS)
-        state.pcm.extend(b"\x00" * rc_bytes)
+        # Pad with a bit more than RIGHT_CONTEXT_MS to ensure stable commit
+        extra_ms = max(60, RIGHT_CONTEXT_MS // 2)
+        state.pcm.extend(b"\x00" * _bytes_per_window(RIGHT_CONTEXT_MS + extra_ms))
         
         audio_t = _bytes_to_f32_mono_tensor(state.pcm, device).contiguous()
         length_t = torch.tensor([audio_t.shape[1]], device=device, dtype=torch.int64)
@@ -215,23 +201,13 @@ async def finalize(state: StreamState) -> str:
             with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
                 proc, proc_len = model.preprocessor(input_signal=audio_t, length=length_t)
                 enc, enc_len = model.encoder(audio_signal=proc, length=proc_len)
-                
-                # Same transpose fix
-                if enc.ndim == 3 and enc.shape[1] in range(128, 2048):
-                    enc = enc.transpose(1, 2).contiguous()
-                
-                if state.partial is None:
+                # Guard tiny tail
+                if int(enc_len[0]) >= 2:
                     hyps = model.decoding.rnnt_decoder_predictions_tensor(
                         encoder_output=enc,
                         encoded_lengths=enc_len,
                         return_hypotheses=True,
-                    )
-                else:
-                    hyps = model.decoding.rnnt_decoder_predictions_tensor(
-                        encoder_output=enc,
-                        encoded_lengths=enc_len,
-                        return_hypotheses=True,
-                        partial_hypotheses=[state.partial],
+                        partial_hypotheses=[state.partial] if state.partial is not None else None,
                     )
         
         state.partial = hyps[0] if isinstance(hyps, (list, tuple)) else hyps
@@ -267,16 +243,10 @@ def _warmup() -> None:
             
             print(f"[warmup] enc.shape={tuple(enc.shape)}")
             
-            # Same transpose fix
-            if enc.ndim == 3 and enc.shape[1] in range(128, 2048):
-                enc = enc.transpose(1, 2).contiguous()
-                print(f"[warmup] transposed to {tuple(enc.shape)}")
-            
             _ = model.decoding.rnnt_decoder_predictions_tensor(
                 encoder_output=enc,
                 encoded_lengths=enc_len,
-                return_hypotheses=True,
-                partial_hypotheses=None,
+                return_hypotheses=False,
             )
         print("[warmup] Complete")
     except Exception as e:

@@ -29,3 +29,6 @@ pip install --index-url "$TORCH_INDEX_URL" \
 
 echo "[03] Installing Python deps…"
 pip install -r requirements.txt
+
+echo "[03] Installing cuda-python to enable CUDA Graph decoder…"
+pip install 'cuda-python>=12.3,<13.0'
