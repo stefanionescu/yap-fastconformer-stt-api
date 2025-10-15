@@ -34,19 +34,54 @@ print(f"[device] {device}")
 model.eval()
 model.freeze()
 
-_decoding_cfg = OmegaConf.create(
-    {
-        "strategy": "greedy",
-        "compute_timestamps": False,
-        "preserve_alignments": False,
-        "greedy": {
-            "loop_labels": True,
-            # only enable CUDA graphs on GPU
-            "use_cuda_graph_decoder": bool(torch.cuda.is_available()),
-            "max_symbols_per_step": 10,
+# Configure RNNT decoding to exclude TDT duration tokens from text output
+_decoding_cfg = OmegaConf.create({
+    "model_type": "rnnt",
+    "strategy": "greedy",
+    "compute_timestamps": False,
+    "compute_hypothesis_token_set": False,
+    "preserve_alignments": False,
+    "rnnt_timestamp_type": "all",
+
+    # Ensure TDT duration symbols are not surfaced as text
+    "durations": [0, 1, 2, 3, 4],
+    "big_blank_durations": [],
+    "word_seperator": " ",
+    "segment_seperators": [".", "!", "?"],
+
+    "confidence_cfg": {
+        "preserve_frame_confidence": False,
+        "preserve_token_confidence": False,
+        "preserve_word_confidence": False,
+        "exclude_blank": True,
+        "aggregation": "min",
+        "tdt_include_duration": False,
+        "method_cfg": {
+            "name": "entropy",
+            "entropy_type": "tsallis",
+            "alpha": 0.33,
+            "entropy_norm": "exp",
         },
-    }
-)
+    },
+
+    "greedy": {
+        "max_symbols_per_step": 10,
+        "loop_labels": True,
+        "use_cuda_graph_decoder": bool(torch.cuda.is_available()),
+        "preserve_alignments": False,
+        "preserve_frame_confidence": False,
+        "tdt_include_token_duration": False,
+        "tdt_include_duration_confidence": False,
+        "confidence_method_cfg": {
+            "name": "entropy",
+            "entropy_type": "tsallis",
+            "alpha": 0.33,
+            "entropy_norm": "exp",
+        },
+        "ngram_lm_model": None,
+        "ngram_lm_alpha": 0.0,
+    },
+})
 model.change_decoding_strategy(_decoding_cfg)
 
 gpu_semaphore = asyncio.Semaphore(MAX_INFLIGHT_STEPS)
@@ -149,6 +184,10 @@ async def rnnt_step(state: StreamState) -> Optional[str]:
         state.last_text = text
         if getattr(state, "_dbg_seen", 0) < MAX_DEBUG_STEPS:
             print(f"[step] partial+ delta='{delta[:40]}' total_len={len(text)}")
+            try:
+                print("[dbg] first10:", [ord(c) for c in (text[:10])])
+            except Exception:
+                pass
     state._dbg_seen = getattr(state, "_dbg_seen", 0) + 1
 
     del state.pcm[:needed]
