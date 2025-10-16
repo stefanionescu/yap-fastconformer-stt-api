@@ -188,33 +188,38 @@ class VoskServer:
             LOGGER.warning("Punct files missing in %s", settings.punct_dir)
             return None
 
-        # Use the new API shape exactly: OnlinePunctuationConfig(model_config=...)
-        cfg = _so.OnlinePunctuationConfig(
-            model_config=_so.OnlinePunctuationModelConfig(
-                cnn_bilstm=str(model_file),
-                bpe_vocab=str(vocab_file),
-                provider="cpu",                   # keep on CPU
-                num_threads=settings.punct_threads,
-                debug=False,
+        try:
+            cfg = _so.OnlinePunctuationConfig(
+                model_config=_so.OnlinePunctuationModelConfig(
+                    cnn_bilstm=str(settings.punct_dir / "model.onnx"),  # or model.int8.onnx
+                    bpe_vocab=str(settings.punct_dir / "bpe.vocab"),
+                    provider="cpu",
+                    num_threads=settings.punct_threads,
+                    debug=False,
+                )
             )
-        )
-        punct = _so.OnlinePunctuation(cfg)
+            punct = _so.OnlinePunctuation(cfg)
 
-        # Bind directly to the canonical method
-        if hasattr(punct, "add_punctuations"):
-            add = punct.add_punctuations
-        elif hasattr(punct, "AddPunctuations"):
-            add = punct.AddPunctuations
-        elif hasattr(punct, "process"):
-            add = punct.process
-        else:
-            LOGGER.warning("No known punctuation method on sherpa object")
+            # ✅ bind the only correct Python method
+            if hasattr(punct, "add_punctuation_with_case"):
+                add = punct.add_punctuation_with_case
+            else:
+                # make this loud if your wheel is too old or built without online punctuation
+                raise RuntimeError(
+                    "OnlinePunctuation.add_punctuation_with_case not found. "
+                    "Upgrade sherpa-onnx to a build that includes the online EN punct+casing model."
+                )
+
+            LOGGER.info("Online punctuation enabled (threads=%d, dir=%s)",
+                        settings.punct_threads, settings.punct_dir)
+
+            return lambda text: add(text)
+        except RuntimeError:
+            # Re-raise RuntimeError to fail fast on missing method
+            raise
+        except Exception:
+            LOGGER.exception("Failed to initialize punctuation; continuing without it")
             return None
-
-        LOGGER.info("Online punctuation enabled (threads=%d, dir=%s)",
-                    settings.punct_threads, settings.punct_dir)
-
-        return lambda text: add(text)
 
 
 async def main() -> None:
