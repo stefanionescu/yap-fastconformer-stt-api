@@ -25,7 +25,9 @@ RUN mkdir -p /models/en /tmp/model && \
     mv "/tmp/model/$MODEL_NAME"/* /models/en/ && \
     rm -rf /tmp/model /tmp/model.zip
 
-# Optional: English punctuation model for sherpa-onnx (CPU)
+# English punctuation model assets for sherpa-onnx (CPU-only inference)
+# NOTE: The Python package 'sherpa-onnx' is installed via requirements.txt.
+#       Here we only download the model files used at runtime.
 RUN mkdir -p /models/punct && \
     curl -L -o /models/punct/punct.tar.bz2 \
       https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-online-punct-en-2024-08-06.tar.bz2 && \

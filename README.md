@@ -7,7 +7,7 @@ GPU-accelerated speech-to-text server built around Vosk (Kaldi + CUDA bindings).
 - Binary WebSocket protocol (`s16le` mono 16 kHz) with partial + final JSON messages
 - Stateless asyncio server that supports dozens of concurrent sessions (`CONCURRENCY` env)
 - Minimal runtime footprint: Python 3.10, websockets, numpy, soundfile, uvloop
-- CPU punctuation + capitalization on finals using `sherpa-onnx` (partials remain raw)
+- CPU punctuation + capitalization on finals using `sherpa-onnx` (wheel via requirements; model assets baked in; partials remain raw)
 - Ready-to-run Docker image (`docker/Dockerfile`) for GPU deployment, plus lightweight CLI clients for smoke tests and benchmarks
 
 ## Quick Start (Docker)
@@ -95,7 +95,7 @@ The server initializes the GPU path at startup via `GpuInit()` before loading th
 
 Connections stay open until the client closes them or the server receives `EOS`.
 
-## Client Utilities
+## Testing
 Install the Python requirements locally:
 
 ```bash
@@ -107,29 +107,24 @@ pip install -r requirements.txt
 Then use the helper scripts under `tests/`:
 - `tests/client.py` – smoke test against a live server
 - `tests/warmup.py` – measures latency, time-to-first-word, and throughput
-- `tests/bench.py` – synthetic concurrency benchmark (sine wave generator)
+- `tests/bench.py` – concurrency benchmark (concurrent sessions using a sample file)
 
 Each tool honours the `--url` flag (default `ws://127.0.0.1:8000`). Audio samples live under `samples/`.
 
-### Quick Python commands
-
-Run these from the repo root after installing requirements (server must be running somewhere).
+Examples of how to call the model:
 
 ```bash
-# Smoke test against local server
-python3 tests/client.py --file mid.wav --full-text
-
 # Warmup (local server, show partials, faster send)
 python3 tests/warmup.py --file realistic.mp3 --rtf 10 --frame-ms 20 --print-partials
 
-# Bench: 32 concurrent synthetic streams for 30s
-python3 tests/bench.py --streams 32 --duration 30 --rtf 1.0
+# Bench: 32 concurrent streams using a real sample
+python3 tests/bench.py --streams 32 --file realistic.mp3 --rtf 1.0
 
 # Point to a remote server explicitly
 python3 tests/warmup.py --url ws://your-host:8000 --file mid.wav
 
 # Or use the WS env var instead of --url
-WS=ws://your-host:8000 python3 tests/bench.py --streams 64
+WS=ws://your-host:8000 python3 tests/bench.py --streams 64 --file realistic.mp3
 
 # Use an absolute audio path
 python3 tests/warmup.py --file /abs/path/to/audio.wav --full-text
