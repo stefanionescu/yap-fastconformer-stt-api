@@ -200,7 +200,7 @@ class VoskServer:
             )
             punct = _so.OnlinePunctuation(cfg)
 
-            # ✅ bind the only correct Python method
+            # bind the only correct Python method
             if hasattr(punct, "add_punctuation_with_case"):
                 add = punct.add_punctuation_with_case
             else:
