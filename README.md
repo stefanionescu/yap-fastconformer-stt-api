@@ -104,8 +104,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Then use the helper scripts under `tests/`:
-- `tests/client.py` – smoke test against a live server
+Then use the Python scripts under `tests/`:
 - `tests/warmup.py` – measures latency, time-to-first-word, and throughput
 - `tests/bench.py` – concurrency benchmark (concurrent sessions using a sample file)
 
