@@ -179,62 +179,42 @@ class VoskServer:
     def _build_punctuator(settings: Settings) -> Optional[Callable[[str], str]]:
         """Create a punctuation function; returns fn(text)->punctuated_text or None."""
         if _so is None:
-            # If you want "mandatory", raise here; otherwise return None to keep server alive.
-            # raise RuntimeError("sherpa-onnx not importable")
+            LOGGER.warning("sherpa_onnx not importable; punctuation disabled")
             return None
-        model_file = settings.punct_dir / "model.onnx"
+
+        model_file = settings.punct_dir / "model.onnx"          # or model.int8.onnx
         vocab_file = settings.punct_dir / "bpe.vocab"
         if not model_file.exists() or not vocab_file.exists():
-            LOGGER.error("Punct files missing in %s (need model.onnx + bpe.vocab)", settings.punct_dir)
+            LOGGER.warning("Punct files missing in %s", settings.punct_dir)
             return None
-        model_path = model_file.as_posix()
-        vocab_path = vocab_file.as_posix()
-        try:
-            # Preferred (newer) API shape: OnlinePunctuationConfig(model_config=OnlinePunctuationModelConfig(...))
-            if hasattr(_so, "OnlinePunctuationConfig") and hasattr(_so, "OnlinePunctuationModelConfig"):
-                cfg = _so.OnlinePunctuationConfig(
-                    model_config=_so.OnlinePunctuationModelConfig(
-                        cnn_bilstm=model_path,
-                        bpe_vocab=vocab_path,
-                        provider="cpu",
-                        num_threads=settings.punct_threads,
-                        debug=False,
-                    )
-                )
-                punct = _so.OnlinePunctuation(cfg)
 
-                def _fn(text: str) -> str:
-                    # method name varies by wheel; try in order
-                    if hasattr(punct, "add_punctuations"):
-                        return punct.add_punctuations(text)
-                    if hasattr(punct, "AddPunctuations"):
-                        return punct.AddPunctuations(text)
-                    if hasattr(punct, "process"):
-                        return punct.process(text)
-                    return text
-
-                LOGGER.info(
-                    "Online punctuation enabled (threads=%d, dir=%s)",
-                    settings.punct_threads,
-                    settings.punct_dir,
-                )
-                return _fn
-            # Older wheels: flat-kwargs constructor
-            punct = _so.OnlinePunctuation(
-                cnn_bilstm=model_path,
-                bpe_vocab=vocab_path,
-                provider="cpu",
+        # Use the new API shape exactly: OnlinePunctuationConfig(model_config=...)
+        cfg = _so.OnlinePunctuationConfig(
+            model_config=_so.OnlinePunctuationModelConfig(
+                cnn_bilstm=str(model_file),
+                bpe_vocab=str(vocab_file),
+                provider="cpu",                   # keep on CPU
                 num_threads=settings.punct_threads,
+                debug=False,
             )
-            LOGGER.info(
-                "Online punctuation enabled (legacy API, threads=%d, dir=%s)",
-                settings.punct_threads,
-                settings.punct_dir,
-            )
-            return lambda s: getattr(punct, "process", lambda x: x)(s)
-        except Exception:
-            LOGGER.exception("Failed to initialize punctuation; continuing without it")
+        )
+        punct = _so.OnlinePunctuation(cfg)
+
+        # Bind directly to the canonical method
+        if hasattr(punct, "add_punctuations"):
+            add = punct.add_punctuations
+        elif hasattr(punct, "AddPunctuations"):
+            add = punct.AddPunctuations
+        elif hasattr(punct, "process"):
+            add = punct.process
+        else:
+            LOGGER.warning("No known punctuation method on sherpa object")
             return None
+
+        LOGGER.info("Online punctuation enabled (threads=%d, dir=%s)",
+                    settings.punct_threads, settings.punct_dir)
+
+        return lambda text: add(text)
 
 
 async def main() -> None:
